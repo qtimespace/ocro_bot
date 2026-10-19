@@ -1,0 +1,13 @@
+# Версии проверены: PaddleOCR 3.7 + PaddlePaddle 3.3.1 (CPU), Python 3.11–3.13.
+# Перед промышленным запуском перепроверьте на целевой ОС и Python (раздел 9 ТЗ, README «Совместимость»).
+aiogram==3.31.0
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+# OpenCV ставится зависимостью paddlex (opencv-contrib-python); второй пакет cv2 ставить нельзя.
+numpy==2.3.5
+Pillow==13.0.0
+python-docx==1.2.0
+PyMuPDF==1.28.2
+openai==3.35.1
+pydantic==2.13.5
+pydantic-settings==2.16.0

@@ -1,0 +1,25 @@
+[Unit]
+Description=Telegram OCR DOCX Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ocrbot
+Group=ocrbot
+WorkingDirectory=/opt/ocr_telegram_bot
+EnvironmentFile=/opt/ocr_telegram_bot/.env
+ExecStart=/opt/ocr_telegram_bot/.venv/bin/python -m app.bot
+Restart=on-failure
+RestartSec=5
+# Ограничение памяти: OCR одной страницы занимает ~1 ГБ.
+MemoryMax=4G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# temp — данные заданий; .paddlex — кэш моделей PaddleOCR.
+ReadWritePaths=/opt/ocr_telegram_bot/temp /opt/ocr_telegram_bot/data /home/ocrbot/.paddlex
+
+[Install]
+WantedBy=multi-user.target

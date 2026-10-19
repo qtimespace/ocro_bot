@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Временные данные заданий бота (FR-09)
+temp/*
+!temp/.gitkeep
+# Данные бота (режимы пользователей)
+data/

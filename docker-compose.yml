@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      TEMP_DIR: /app/temp
+    restart: unless-stopped
+    volumes:
+      - paddle-models:/home/ocrbot/.paddlex
+      - bot-data:/app/data
+    tmpfs:
+      - /app/temp:size=1g,uid=10001,gid=10001
+    mem_limit: 4g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  paddle-models:
+  bot-data:
