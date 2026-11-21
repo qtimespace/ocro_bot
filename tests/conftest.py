@@ -25,6 +25,17 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
     return Settings(_env_file=None, **values)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch):
+    """Тесты не должны видеть боевые настройки из окружения (в контейнере .env приходит переменными)."""
+    import os
+
+    names = {field.alias.upper() for field in Settings.model_fields.values() if field.alias}
+    for key in list(os.environ):
+        if key.upper() in names:
+            monkeypatch.delenv(key, raising=False)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return make_settings(tmp_path)
