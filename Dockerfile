@@ -19,7 +19,8 @@ COPY app ./app
 COPY tests ./tests
 COPY pytest.ini .env.example ./
 # Каталоги заранее с владельцем ocrbot: Docker копирует права в новые тома при первом подключении.
-RUN mkdir -p /app/temp /app/data /home/ocrbot/.paddlex \n    && chown -R ocrbot:ocrbot /app /home/ocrbot/.paddlex
+RUN mkdir -p /app/temp /app/data /home/ocrbot/.paddlex \
+    && chown -R ocrbot:ocrbot /app /home/ocrbot/.paddlex
 
 USER ocrbot
 # Модели PaddleOCR скачиваются при первом запуске в ~/.paddlex — вынесите в volume.
