@@ -140,6 +140,7 @@ class Pipeline:
                     max_pages=s.max_pdf_pages - len(pages),
                     max_pixels=s.max_image_pixels,
                     pdf_dpi=s.pdf_dpi,
+                    max_side=s.page_max_side,
                 )
             except InputFileError as exc:
                 if len(inputs) > 1:

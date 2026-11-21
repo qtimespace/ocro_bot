@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     max_pdf_pages: int = Field(default=30, gt=0, alias="MAX_PDF_PAGES")
     max_image_pixels: int = Field(default=40_000_000, gt=0, alias="MAX_IMAGE_PIXELS")
     pdf_dpi: int = Field(default=200, ge=72, le=600, alias="PDF_DPI")
+    # Ограничение длинной стороны страницы в пикселях (0 — без ограничения). Снижает память и время OCR.
+    page_max_side: int = Field(default=0, ge=0, alias="PAGE_MAX_SIDE")
     max_concurrent_jobs: int = Field(default=1, ge=1, alias="MAX_CONCURRENT_JOBS")
     # Файлы, присланные подряд с паузами меньше этого значения, собираются в один документ. 0 — каждый отдельно.
     batch_collect_seconds: float = Field(default=4.0, ge=0, le=60, alias="BATCH_COLLECT_SECONDS")

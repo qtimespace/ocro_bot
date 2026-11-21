@@ -10,7 +10,7 @@ services:
       - bot-data:/app/data
     tmpfs:
       - /app/temp:size=1g,uid=10001,gid=10001
-    mem_limit: 4g
+    mem_limit: ${BOT_MEM_LIMIT:-4g}
     logging:
       driver: json-file
       options:

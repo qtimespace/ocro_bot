@@ -57,8 +57,12 @@ def parse_file(
     max_pages: int,
     max_pixels: int,
     pdf_dpi: int = 200,
+    max_side: int = 0,
 ) -> list[PageImage]:
-    """Проверяет файл и сохраняет страницы как PNG в out_dir."""
+    """Проверяет файл и сохраняет страницы как PNG в out_dir.
+
+    max_side > 0 ограничивает длинную сторону страницы (экономия памяти на слабых серверах).
+    """
     check_size(path.stat().st_size, max_bytes)
     with path.open("rb") as fh:
         head = fh.read(1024)
@@ -67,8 +71,8 @@ def parse_file(
         raise InputFileError(f"Неподдерживаемый формат файла. Поддерживаются: {SUPPORTED_FORMATS_TEXT}.")
     out_dir.mkdir(parents=True, exist_ok=True)
     if kind == "pdf":
-        return _parse_pdf(path, out_dir, max_pages=max_pages, max_pixels=max_pixels, dpi=pdf_dpi)
-    return _parse_image(path, out_dir, kind, max_pages=max_pages, max_pixels=max_pixels)
+        return _parse_pdf(path, out_dir, max_pages=max_pages, max_pixels=max_pixels, dpi=pdf_dpi, max_side=max_side)
+    return _parse_image(path, out_dir, kind, max_pages=max_pages, max_pixels=max_pixels, max_side=max_side)
 
 
 def _page_path(out_dir: Path, index: int) -> Path:
@@ -103,7 +107,9 @@ def _normalize_mode(im: Image.Image) -> Image.Image:
     return im.convert("RGB")
 
 
-def _parse_image(path: Path, out_dir: Path, kind: str, *, max_pages: int, max_pixels: int) -> list[PageImage]:
+def _parse_image(
+    path: Path, out_dir: Path, kind: str, *, max_pages: int, max_pixels: int, max_side: int = 0
+) -> list[PageImage]:
     try:
         im = Image.open(path)
     except Image.DecompressionBombError as exc:
@@ -127,6 +133,10 @@ def _parse_image(path: Path, out_dir: Path, kind: str, *, max_pages: int, max_pi
                 im.load()
                 frame = ImageOps.exif_transpose(im) if index == 0 else im.copy()
                 frame = _normalize_mode(frame)
+                if max_side and max(frame.size) > max_side:
+                    ratio = max_side / max(frame.size)
+                    size = (max(1, round(frame.width * ratio)), max(1, round(frame.height * ratio)))
+                    frame = frame.resize(size, Image.Resampling.LANCZOS)
                 target = _page_path(out_dir, index + 1)
                 frame.save(target, format="PNG")
                 pages.append(PageImage(index=index + 1, path=target, width=frame.width, height=frame.height))
@@ -139,7 +149,9 @@ def _parse_image(path: Path, out_dir: Path, kind: str, *, max_pages: int, max_pi
         return pages
 
 
-def _parse_pdf(path: Path, out_dir: Path, *, max_pages: int, max_pixels: int, dpi: int) -> list[PageImage]:
+def _parse_pdf(
+    path: Path, out_dir: Path, *, max_pages: int, max_pixels: int, dpi: int, max_side: int = 0
+) -> list[PageImage]:
     try:
         doc = fitz.open(path, filetype="pdf")
     except Exception as exc:
@@ -159,6 +171,8 @@ def _parse_pdf(path: Path, out_dir: Path, *, max_pages: int, max_pixels: int, dp
                 if rect.width <= 0 or rect.height <= 0:
                     raise InputFileError(f"Страница {page_no + 1} PDF имеет нулевой размер.")
                 scale = dpi / 72
+                if max_side:
+                    scale = min(scale, max(MIN_PDF_DPI / 72, max_side / max(rect.width, rect.height)))
                 # Уменьшаем разрешение рендера, чтобы страница уложилась в лимит пикселей.
                 if rect.width * rect.height * scale * scale > max_pixels:
                     scale = math.sqrt(max_pixels / (rect.width * rect.height)) * 0.995

@@ -131,3 +131,13 @@ def test_pdf_annotations_not_rendered(tmp_path):
     pages = parse_file(write(tmp_path, "c.pdf", data), tmp_path / "out", **LIMITS, pdf_dpi=72)
     with Image.open(pages[0].path) as im:
         assert im.convert("L").getextrema() == (255, 255)  # страница пустая: комментарий не нарисован
+
+
+def test_max_side_limits_image_and_pdf(tmp_path):
+    pages = parse_file(write(tmp_path, "big.png", image_bytes("PNG", size=(3000, 4000))), tmp_path / "o1", **LIMITS,
+                       max_side=2000)
+    assert (pages[0].width, pages[0].height) == (1500, 2000)
+    pdf_pages = parse_file(write(tmp_path, "d.pdf", pdf_bytes(1)), tmp_path / "o2", **LIMITS, pdf_dpi=300, max_side=1000)
+    assert max(pdf_pages[0].width, pdf_pages[0].height) <= 1001
+    small = parse_file(write(tmp_path, "s.png", image_bytes("PNG")), tmp_path / "o3", **LIMITS, max_side=2000)
+    assert (small[0].width, small[0].height) == (600, 800)
