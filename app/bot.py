@@ -6,9 +6,11 @@ import re
 import sys
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BotCommandScopeChat
 from pydantic import ValidationError
 
+from app.access import AccessStore
+from app.admin import create_admin_router
 from app.config import Settings, get_settings
 from app.handlers import AccessMiddleware, JobLimiter, UserModeStore, create_router
 from app.services.ai_validator import AIValidator
@@ -64,13 +66,37 @@ def build_dispatcher(settings: Settings, ocr_engine: OcrEngine, validator: AIVal
     dp = Dispatcher()
     dp["settings"] = settings
     dp["modes"] = UserModeStore(settings.data_dir / "user_modes.json" if settings.data_dir else None)
+    dp["access"] = AccessStore(settings, settings.data_dir / "users.json" if settings.data_dir else None)
     dp["pipeline"] = Pipeline(settings, ocr_engine, validator)
     dp["limiter"] = JobLimiter(settings.max_concurrent_jobs)
     access = AccessMiddleware()
     dp.message.outer_middleware(access)
     dp.callback_query.outer_middleware(access)
+    dp.include_router(create_admin_router())  # до основного: иначе кнопки админа уйдут в fallback
     dp.include_router(create_router())
     return dp
+
+
+async def _set_commands(bot: Bot, admin_ids) -> None:
+    common = [
+        BotCommand(command="start", description="Как пользоваться ботом"),
+        BotCommand(command="mode", description="Режим AI-проверки"),
+    ]
+    admin = common + [
+        BotCommand(command="users", description="Пользователи с доступом"),
+        BotCommand(command="adduser", description="Выдать доступ: /adduser ID [имя]"),
+        BotCommand(command="deluser", description="Закрыть доступ: /deluser ID"),
+    ]
+    try:
+        await bot.set_my_commands(common)
+    except Exception as exc:
+        log.warning("Failed to set bot commands: %s", type(exc).__name__)
+    for admin_id in admin_ids:
+        try:
+            await bot.set_my_commands(admin, scope=BotCommandScopeChat(chat_id=admin_id))
+        except Exception as exc:
+            # Чат с администратором ещё не начат — команды появятся после перезапуска.
+            log.warning("Failed to set admin commands for %s: %s", admin_id, type(exc).__name__)
 
 
 async def _warmup(engine, layout=None) -> None:
@@ -117,16 +143,18 @@ async def main() -> None:
     dp = build_dispatcher(settings, engine, validator)
     bot = Bot(token)
     warmup = asyncio.create_task(_warmup(engine, dp["pipeline"].layout))
-    try:
-        await bot.set_my_commands([
-            BotCommand(command="start", description="Как пользоваться ботом"),
-            BotCommand(command="mode", description="Режим AI-проверки"),
-        ])
-    except Exception as exc:
-        log.warning("Failed to set bot commands: %s", type(exc).__name__)
-    log.info("Bot started: docx_mode=%s default_ai_mode=%s ai_provider=%s ai_model=%s allowlist=%s",
+    access = dp["access"]
+    await _set_commands(bot, access.admin_ids)
+    log.info("Bot started: docx_mode=%s default_ai_mode=%s ai_provider=%s ai_model=%s",
              settings.docx_mode, settings.ai_validation_mode, settings.resolved_ai_provider,
-             settings.ai_model if settings.ai_available else None, bool(settings.allowed_ids))
+             settings.ai_model if settings.ai_available else None)
+    if access.closed:
+        log.info("Access restricted: admins=%d env_users=%d added_users=%d",
+                 len(access.admin_ids), len(access.env_ids - access.admin_ids), len(access.users))
+    else:
+        log.warning("Access NOT restricted: anyone can use the bot. Set ADMIN_TELEGRAM_USER_IDS in .env")
+    if access.users and not access.admin_ids:
+        log.warning("ADMIN_TELEGRAM_USER_IDS is empty: users added in the bot cannot be managed")
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:

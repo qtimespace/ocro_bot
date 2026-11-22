@@ -208,8 +208,9 @@ async def test_dispatcher_start_and_access(tmp_path, sent):
     await dp.feed_update(bot, update("/start", 7))
     await dp.feed_update(bot, update("/mode", 7))
     assert "распознаю" in sent[0][1]
-    assert sent[1][1] == handlers.ACCESS_DENIED
-    assert sent[2][1] == handlers.ACCESS_DENIED
+    assert sent[1][1].startswith(handlers.ACCESS_DENIED) and "ID: 7" in sent[1][1]
+    assert sent[2][1].startswith(handlers.ACCESS_DENIED)
+    assert "администратору" not in sent[1][1]  # администраторов нет — запрос отправлять некому
     await bot.session.close()
 
 

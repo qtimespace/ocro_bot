@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     data_dir: Path | None = Field(default=Path("./data"), alias="DATA_DIR")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     allowed_telegram_user_ids: str = Field(default="", alias="ALLOWED_TELEGRAM_USER_IDS")
+    # Администраторы: всегда имеют доступ и добавляют/удаляют пользователей командами в боте.
+    admin_telegram_user_ids: str = Field(default="", alias="ADMIN_TELEGRAM_USER_IDS")
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
@@ -87,18 +89,22 @@ class Settings(BaseSettings):
     def _empty_path(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
 
-    @field_validator("allowed_telegram_user_ids")
+    @field_validator("allowed_telegram_user_ids", "admin_telegram_user_ids")
     @classmethod
-    def _check_ids(cls, value: str) -> str:
+    def _check_ids(cls, value: str, info) -> str:
         for item in value.split(","):
             item = item.strip()
             if item and not item.lstrip("-").isdigit():
-                raise ValueError(f"ALLOWED_TELEGRAM_USER_IDS: '{item}' is not a Telegram user ID")
+                raise ValueError(f"{info.field_name.upper()}: '{item}' is not a Telegram user ID")
         return value
 
     @property
     def allowed_ids(self) -> frozenset[int]:
-        return frozenset(int(x) for x in (s.strip() for s in self.allowed_telegram_user_ids.split(",")) if x)
+        return _parse_ids(self.allowed_telegram_user_ids)
+
+    @property
+    def admin_ids(self) -> frozenset[int]:
+        return _parse_ids(self.admin_telegram_user_ids)
 
     @property
     def languages(self) -> list[str]:
@@ -144,9 +150,14 @@ class Settings(BaseSettings):
         return self.resolved_ai_provider is not None
 
     def is_allowed(self, user_id: int | None) -> bool:
-        if not self.allowed_ids:
+        """Доступ только по .env (без пользователей, добавленных в боте; полная проверка — AccessStore)."""
+        if not self.allowed_ids and not self.admin_ids:
             return True
-        return user_id is not None and user_id in self.allowed_ids
+        return user_id is not None and (user_id in self.allowed_ids or user_id in self.admin_ids)
+
+
+def _parse_ids(value: str) -> frozenset[int]:
+    return frozenset(int(x) for x in (s.strip() for s in value.split(",")) if x)
 
 
 @lru_cache

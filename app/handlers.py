@@ -17,6 +17,8 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.access import AccessStore
+from app.admin import ADD_BUTTON, USERS_BUTTON, admin_buttons, notify_admins
 from app.config import Settings
 from app.models import VALIDATION_MODES, JobResult, ValidationMode
 from app.services.ai_validator import AIValidationError
@@ -94,7 +96,8 @@ class JobLimiter:
 
 
 class AccessMiddleware(BaseMiddleware):
-    """Проверяет allowlist для всех сообщений и callback-запросов (FR-10)."""
+    """Пускает только администраторов и разрешённых пользователей (FR-10).
+    Неизвестному пользователю сообщает его ID и отправляет администраторам запрос доступа."""
 
     async def __call__(
         self,
@@ -102,15 +105,25 @@ class AccessMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        settings: Settings = data["settings"]
+        access: AccessStore = data["access"]
         user = data.get("event_from_user")
-        if settings.is_allowed(user.id if user else None):
+        user_id = user.id if user else None
+        if access.is_allowed(user_id):
+            if user is not None:
+                access.refresh(user.id, user.full_name, user.username)
             return await handler(event, data)
-        log.warning("Access denied for user_id=%s", user.id if user else None)
+        log.warning("Access denied for user_id=%s", user_id)
         if isinstance(event, CallbackQuery):
             await event.answer("Доступ запрещён.", show_alert=True)
         elif isinstance(event, Message):
-            await event.answer(ACCESS_DENIED)
+            text = ACCESS_DENIED
+            if user is not None:
+                text += f"\nВаш Telegram ID: {user.id}"
+                if access.admin_ids:
+                    if access.should_notify(user.id, user.full_name, user.username):
+                        await notify_admins(data["bot"], access, user)
+                    text += "\nЗапрос на доступ отправлен администратору — дождитесь ответа."
+            await event.answer(text)
         return None
 
 
@@ -213,17 +226,20 @@ def result_caption(result: JobResult) -> str:
 # --- Команды ----------------------------------------------------------------
 
 
-def main_keyboard() -> ReplyKeyboardMarkup:
-    """Постоянная кнопка под полем ввода."""
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=MODE_BUTTON)]], resize_keyboard=True, is_persistent=True,
-    )
+def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    """Постоянные кнопки под полем ввода; у администратора — ещё управление пользователями."""
+    rows = [[KeyboardButton(text=MODE_BUTTON)]]
+    if is_admin:
+        rows += admin_buttons()
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
-async def cmd_start(message: Message, settings: Settings, modes: UserModeStore) -> None:
-    await message.answer(
-        start_text(settings, effective_mode(message.from_user.id, settings, modes)), reply_markup=main_keyboard()
-    )
+async def cmd_start(message: Message, settings: Settings, modes: UserModeStore, access: AccessStore) -> None:
+    is_admin = access.is_admin(message.from_user.id)
+    text = start_text(settings, effective_mode(message.from_user.id, settings, modes))
+    if is_admin:
+        text += f"\n\nВы администратор: «{USERS_BUTTON}» — список и удаление, «{ADD_BUTTON}» — выдать доступ."
+    await message.answer(text, reply_markup=main_keyboard(is_admin))
 
 
 async def cmd_mode(
