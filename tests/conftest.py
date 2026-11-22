@@ -20,6 +20,7 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         "ALLOWED_TELEGRAM_USER_IDS": "",
         "BATCH_COLLECT_SECONDS": "0",
         "DATA_DIR": "",
+        "SPELLCHECK": "false",
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)

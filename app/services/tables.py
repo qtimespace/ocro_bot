@@ -474,6 +474,21 @@ def blocks_to_text(blocks: Iterable[Block]) -> str:
     return "\n".join(t for t in (block_text(b) for b in blocks) if t).strip()
 
 
+def map_blocks_text(blocks: list[Block], transform) -> list[Block]:
+    """Применяет transform(text) -> text к абзацам и ячейкам таблиц (ячейки меняются на месте)."""
+    result: list[Block] = []
+    for block in blocks:
+        if isinstance(block, Table):
+            for cell in block.cells:
+                cell.text = transform(cell.text)
+            result.append(block)
+        elif isinstance(block, Paragraph):
+            result.append(replace(block, text=transform(block.text)))
+        else:
+            result.append(transform(block))
+    return result
+
+
 def blocks_with_placeholders(blocks: list[Block]) -> tuple[str, list[Table]]:
     """Текст страницы для ИИ: абзац — одна строка, таблицы заменены метками [[ТАБЛИЦА N]]."""
     lines: list[str] = []

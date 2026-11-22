@@ -149,6 +149,8 @@ class PageResult:
     warnings: list[str] = field(default_factory=list)
     # Содержимое страницы с таблицами; пусто — использовать text построчно.
     blocks: list[Block] = field(default_factory=list)
+    # Слова не из словаря (возможные ошибки OCR).
+    suspicious: list[str] = field(default_factory=list)
 
 
 @dataclass

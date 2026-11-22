@@ -26,14 +26,17 @@ from app.services.file_parser import InputFileError, parse_file
 from app.services.ocr_engine import OcrEngine
 from app.services.page_order import detect_page_number, has_conflicting_numbers, order_by_page_numbers
 from app.services.preprocessing import load_for_ocr
+from app.services.spelling import SpellChecker, document_vocabulary
 from app.services.tables import (
     blocks_from_placeholders, blocks_to_text, blocks_with_placeholders, build_blocks, detect_tables,
-    erase_table_lines, estimate_skew, rotate,
+    erase_table_lines, estimate_skew, map_blocks_text, rotate,
 )
 
 log = logging.getLogger(__name__)
 
 JOB_PREFIX = "job_"
+MAX_SUSPICIOUS_SHOWN = 15
+MAX_AI_HINTS = 60
 ProgressCallback = Callable[[str], Awaitable[None]]
 
 
@@ -98,10 +101,14 @@ class PageScan:
 
 
 class Pipeline:
-    def __init__(self, settings: Settings, ocr_engine: OcrEngine, validator: AIValidator | None = None):
+    def __init__(self, settings: Settings, ocr_engine: OcrEngine, validator: AIValidator | None = None,
+                 speller: SpellChecker | None = None):
         self.settings = settings
         self.ocr_engine = ocr_engine
         self.validator = validator
+        if speller is None and settings.spellcheck:
+            speller = SpellChecker.create(settings.languages, settings.spell_dict_dir)
+        self.speller = speller
 
     def _ocr_page(self, page: PageImage) -> PageScan:
         """Выравнивание наклона, OCR, удаление примечаний Word и поиск таблиц для одной страницы."""
@@ -189,6 +196,8 @@ class Pipeline:
         if len(inputs) > 1:
             recognized = self._restore_order(recognized, len(inputs), job_warnings)
 
+        # Словарь документа: одинаково повторяющиеся слова — термины; по ним же исправляется регистр.
+        vocab = document_vocabulary(ocr.text for _, ocr in recognized) if self.speller else None
         results: list[PageResult] = []
         for page, ocr in recognized:
             scan = scans[id(page)]
@@ -196,8 +205,10 @@ class Pipeline:
             result = PageResult(page=page, text=blocks_to_text(blocks), blocks=blocks)
             if scan.removed_comments:
                 result.warnings.append(f"Страница {page.index}: примечания Word на полях исключены из текста.")
+            self._spellcheck(result, vocab)
 
-            low = [f for f in ocr.fragments if f.confidence < s.ocr_min_confidence]
+            # Со словарём предупреждения — по словам не из словаря; без него — по низкой уверенности OCR.
+            low = [] if self.speller else [f for f in ocr.fragments if f.confidence < s.ocr_min_confidence]
             for fragment in low:
                 result.warnings.append(
                     f"Страница {page.index}: «{fragment.text[:200]}» — низкая уверенность OCR ({fragment.confidence:.0%})"
@@ -208,6 +219,13 @@ class Pipeline:
         if mode != "off":
             await self._validate_all(results, mode, report, job_warnings)
         for result in results:
+            if mode != "off" and result.validation in ("text_checked", "image_checked"):
+                self._spellcheck(result, vocab)  # после правок ИИ — что осталось не из словаря
+            if result.suspicious:
+                shown = ", ".join(f"«{w}»" for w in result.suspicious[:MAX_SUSPICIOUS_SHOWN])
+                more = len(result.suspicious) - MAX_SUSPICIOUS_SHOWN
+                result.warnings.append(f"Страница {result.page.index}: проверьте слова (нет в словаре): {shown}"
+                                       + (f" и ещё {more}" if more > 0 else ""))
             if not result.text:
                 result.warnings.append(f"Страница {result.page.index}: текст не найден.")
 
@@ -242,6 +260,24 @@ class Pipeline:
             page.index = index
         return reordered
 
+    def _spellcheck(self, result: PageResult, vocab=None) -> None:
+        """Безопасные исправления орфографии в тексте страницы и список слов не из словаря."""
+        if self.speller is None:
+            return
+        found: list[str] = []
+
+        def fix(text: str) -> str:
+            fixed, suspicious = self.speller.check_text(text, vocab)
+            found.extend(w for w in suspicious if w not in found)
+            return fixed
+
+        if result.blocks:
+            result.blocks = map_blocks_text(result.blocks, fix)
+            result.text = blocks_to_text(result.blocks)
+        else:
+            result.text = fix(result.text)
+        result.suspicious = found
+
     async def _validate_all(self, results: list[PageResult], mode: ValidationMode, report, notes: list[str]) -> None:
         """AI-проверка страниц параллельно (до AI_CONCURRENCY запросов). После сбоя новые запросы не отправляются."""
         pending = [r for r in results if r.text]
@@ -271,11 +307,12 @@ class Pipeline:
         # Абзац — одна строка; таблицы передаются ИИ отдельно по ячейкам, в тексте — метки [[ТАБЛИЦА N]].
         text, tables = blocks_with_placeholders(result.blocks) if result.blocks else (result.text, [])
         try:
+            hints = result.suspicious[:MAX_AI_HINTS]
             if mode == "text":
-                checked = await self.validator.validate_text(text, tables=tables)
+                checked = await self.validator.validate_text(text, tables=tables, hints=hints)
                 result.validation = "text_checked"
             else:
-                checked = await self.validator.validate_image(result.page.path, text, tables=tables)
+                checked = await self.validator.validate_image(result.page.path, text, tables=tables, hints=hints)
                 result.validation = "image_checked"
         except AIValidationError as exc:
             log.warning("AI validation failed on page %s: %s", result.page.index, exc)

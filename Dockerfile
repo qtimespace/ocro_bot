@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libglib2.0-0 libgomp1 fonts-dejavu-core \
+       libenchant-2-2 hunspell-ru hunspell-en-us \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 10001 ocrbot

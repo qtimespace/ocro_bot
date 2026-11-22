@@ -11,3 +11,5 @@ PyMuPDF==1.28.2
 openai==3.35.1
 pydantic==2.13.5
 pydantic-settings==2.16.0
+# Проверка орфографии (нужны libenchant-2-2 и словари hunspell-ru/hunspell-en-us; без них — отключается).
+pyenchant==3.3.0

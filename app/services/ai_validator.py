@@ -148,16 +148,20 @@ class AIValidator:
         # Часть моделей (например, reasoning-модели) не принимает temperature — отключаем после первого отказа.
         self.use_temperature = True
 
-    async def validate_text(self, text: str, tables: list[Table] | None = None) -> ValidationResult:
-        payload = self._payload(text, tables)
+    async def validate_text(
+        self, text: str, tables: list[Table] | None = None, hints: list[str] | None = None
+    ) -> ValidationResult:
+        payload = self._payload(text, tables, hints)
         messages = [
             {"role": "system", "content": TEXT_PROMPT + (TABLE_RULES if tables else "")},
             {"role": "user", "content": payload},
         ]
         return apply_safeguards(text, await self._ask(messages))
 
-    async def validate_image(self, image_path: Path, text: str, tables: list[Table] | None = None) -> ValidationResult:
-        payload = self._payload(text, tables)
+    async def validate_image(
+        self, image_path: Path, text: str, tables: list[Table] | None = None, hints: list[str] | None = None
+    ) -> ValidationResult:
+        payload = self._payload(text, tables, hints)
         messages = [
             {"role": "system", "content": IMAGE_PROMPT + (TABLE_RULES if tables else "")},
             {
@@ -170,8 +174,13 @@ class AIValidator:
         ]
         return apply_safeguards(text, await self._ask(messages))
 
-    def _payload(self, text: str, tables: list[Table] | None) -> str:
+    def _payload(self, text: str, tables: list[Table] | None, hints: list[str] | None = None) -> str:
         payload = "OCR text between markers:\n<<<OCR\n" + text + "\nOCR>>>"
+        if hints:
+            payload += (
+                "\nWords not found in the spelling dictionary (likely OCR errors, check them first; "
+                "they may also be correct names, terms or abbreviations — then keep them): " + ", ".join(hints)
+            )
         if tables:
             data = [
                 {"id": n, "cells": [{"r": c.row, "c": c.col, "text": c.text} for c in t.cells]}

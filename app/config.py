@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     ocr_orientation: bool = Field(default=False, alias="OCR_ORIENTATION")
     ocr_det_limit_side: int = Field(default=1280, ge=0, alias="OCR_DET_LIMIT_SIDE")
     strip_word_comments: bool = Field(default=True, alias="STRIP_WORD_COMMENTS")
+    # Проверка орфографии словарями Hunspell (Enchant): автоисправление смешения алфавитов и регистра,
+    # подсказки для ИИ и предупреждения вместо «низкой уверенности OCR».
+    spellcheck: bool = Field(default=True, alias="SPELLCHECK")
+    # Каталог со словарями в подкаталоге hunspell/ (ru_RU.aff/.dic, en_US.aff/.dic). Пусто — системные словари.
+    spell_dict_dir: str = Field(default="", alias="SPELL_DICT_DIR")
     ocr_deskew: bool = Field(default=True, alias="OCR_DESKEW")
     detect_tables: bool = Field(default=True, alias="DETECT_TABLES")
 
