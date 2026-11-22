@@ -270,9 +270,13 @@ class RapidOcrEngine:
                  self.det_limit_side or "none")
 
     def warmup(self) -> None:
-        with self._lock:
-            if self._engine is None:
-                self._load()
+        """Загрузка моделей. RapidOCR скачивает их лениво — при первом распознавании, поэтому
+        распознаём маленькую картинку с текстом (в Docker это происходит при сборке образа)."""
+        import cv2
+
+        sample = np.full((64, 320, 3), 255, dtype=np.uint8)
+        cv2.putText(sample, "OCR 2026", (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 0), 3)
+        self.recognize(sample)
 
     def recognize(self, image: np.ndarray) -> OcrResult:
         with self._lock:
