@@ -21,6 +21,7 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         "BATCH_COLLECT_SECONDS": "0",
         "DATA_DIR": "",
         "SPELLCHECK": "false",
+        "SEARCHABLE_PDF": "false",
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)

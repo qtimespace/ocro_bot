@@ -172,10 +172,10 @@ async def _safe_edit(message: Message | None, text: str, reply_markup=None) -> N
         log.warning("Failed to update status message: %s", type(exc).__name__)
 
 
-def output_filename(original: str | None) -> str:
+def output_filename(original: str | None, suffix: str = ".docx") -> str:
     stem = Path(original or "").stem
     stem = re.sub(r"[^\w\- ]+", "_", stem, flags=re.UNICODE).strip(" _")[:60]
-    return f"{stem or 'document'}_ocr.docx"
+    return f"{stem or 'document'}_ocr{suffix}"
 
 
 def split_message(lines: list[str], header: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
@@ -343,6 +343,11 @@ async def handle_file(
                 FSInputFile(result.docx_path, filename=output_filename(filename)),
                 caption=result_caption(result),
             )
+            if result.pdf_path and result.pdf_path.stat().st_size <= TELEGRAM_MAX_SEND_BYTES:
+                await message.answer_document(
+                    FSInputFile(result.pdf_path, filename=output_filename(filename, ".pdf")),
+                    caption="PDF с текстовым слоем: вид как у оригинала, поиск и копирование текста работают.",
+                )
         log.info("Job done: user=%s pages=%d mode=%s warnings=%d ai_failed=%s", user_id, len(result.pages),
                  result.mode, len(result.warnings), result.ai_failed)
         for text in warning_messages(result):

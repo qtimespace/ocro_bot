@@ -151,6 +151,8 @@ class PageResult:
     blocks: list[Block] = field(default_factory=list)
     # Слова не из словаря (возможные ошибки OCR).
     suspicious: list[str] = field(default_factory=list)
+    # Фрагменты OCR в координатах изображения страницы — для текстового слоя PDF.
+    fragments: list[OcrLine] = field(default_factory=list)
 
 
 @dataclass
@@ -159,6 +161,7 @@ class JobResult:
     pages: list[PageResult]
     mode: ValidationMode
     warnings: list[str] = field(default_factory=list)
+    pdf_path: Path | None = None  # searchable PDF, если включён
 
     @property
     def ai_failed(self) -> bool:

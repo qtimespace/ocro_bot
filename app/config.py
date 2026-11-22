@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Проверка орфографии словарями Hunspell (Enchant): автоисправление смешения алфавитов и регистра,
     # подсказки для ИИ и предупреждения вместо «низкой уверенности OCR».
     spellcheck: bool = Field(default=True, alias="SPELLCHECK")
+    # Второй файл в ответе: исходный скан с невидимым текстовым слоем (поиск и копирование текста).
+    searchable_pdf: bool = Field(default=True, alias="SEARCHABLE_PDF")
+    # Шрифт с кириллицей для текстового слоя PDF; пусто — DejaVu/Arial из системы.
+    pdf_font: str = Field(default="", alias="PDF_FONT")
     # Каталог со словарями в подкаталоге hunspell/ (ru_RU.aff/.dic, en_US.aff/.dic). Пусто — системные словари.
     spell_dict_dir: str = Field(default="", alias="SPELL_DICT_DIR")
     ocr_deskew: bool = Field(default=True, alias="OCR_DESKEW")

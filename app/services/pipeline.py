@@ -7,7 +7,7 @@ asyncio.to_thread, чтобы не блокировать event loop (NFR-01). �
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import shutil
 import tempfile
 import time
@@ -17,11 +17,14 @@ from pathlib import Path
 
 from app.config import Settings
 import cv2
+import numpy as np
+from PIL import Image
 
 from app.models import JobResult, OcrResult, PageImage, PageResult, Table, ValidationMode
 from app.services.ai_validator import AIValidationError, AIValidator, apply_table_fixes
 from app.services.comments import crop_page, find_comment_cut, find_side_column, strip_comments
 from app.services.document_builder import build_docx
+from app.services.pdf_builder import PdfBuildError, build_searchable_pdf
 from app.services.file_parser import InputFileError, parse_file
 from app.services.ocr_engine import OcrEngine
 from app.services.page_order import detect_page_number, has_conflicting_numbers, order_by_page_numbers
@@ -74,6 +77,12 @@ def _format_ai_warning(page_no: int, fragment: str, reason: str) -> str:
     return f"Страница {page_no}: {reason}"
 
 
+def _rotate_page_file(path: Path, degrees: float) -> None:
+    with Image.open(path) as im:
+        rotated = rotate(np.asarray(im.convert("RGB")), degrees)
+    Image.fromarray(rotated).save(path, format="PNG")
+
+
 def measure_ink(ocr: OcrResult, gray) -> None:
     """Доля тёмных пикселей в рамке каждого фрагмента (признак жирного шрифта); интегральное изображение — O(1) на рамку."""
     if gray is None or gray.size == 0:
@@ -117,8 +126,10 @@ class Pipeline:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         skew = estimate_skew(gray) if s.ocr_deskew else 0.0
         if skew:
-            # Поворачивается только копия для OCR; координаты фрагментов — в выровненной системе.
+            # Копия для OCR и сам оригинал страницы выравниваются одинаково: координаты OCR совпадают
+            # с изображением (текстовый слой PDF, обрезка примечаний), а в документе страница ровная.
             image, gray = rotate(image, skew), rotate(gray, skew)
+            _rotate_page_file(page.path, skew)
         tables = detect_tables(gray, image) if s.detect_tables else []
         scan = PageScan(ocr=self.ocr_engine.recognize(erase_table_lines(image, tables)), skew=skew)
         measure_ink(scan.ocr, gray)
@@ -202,7 +213,7 @@ class Pipeline:
         for page, ocr in recognized:
             scan = scans[id(page)]
             blocks = build_blocks(ocr, scan.tables, page.height)
-            result = PageResult(page=page, text=blocks_to_text(blocks), blocks=blocks)
+            result = PageResult(page=page, text=blocks_to_text(blocks), blocks=blocks, fragments=ocr.fragments)
             if scan.removed_comments:
                 result.warnings.append(f"Страница {page.index}: примечания Word на полях исключены из текста.")
             self._spellcheck(result, vocab)
@@ -231,8 +242,19 @@ class Pipeline:
 
         await report("Формирую DOCX…")
         docx_path = await asyncio.to_thread(build_docx, results, work_dir / "result.docx", s.docx_mode)
+        pdf_path = None
+        if s.searchable_pdf:
+            if self.speller is not None:
+                for result in results:  # те же безопасные исправления, что и в DOCX
+                    result.fragments = [
+                        replace(f, text=self.speller.check_text(f.text, vocab)[0]) for f in result.fragments
+                    ]
+            try:
+                pdf_path = await asyncio.to_thread(build_searchable_pdf, results, work_dir / "result.pdf", s.pdf_font)
+            except PdfBuildError as exc:
+                log.warning("Searchable PDF skipped: %s", exc)  # DOCX важнее — задание не прерываем
         warnings = job_warnings + [w for r in results for w in r.warnings]
-        return JobResult(docx_path=docx_path, pages=results, mode=mode, warnings=warnings)
+        return JobResult(docx_path=docx_path, pages=results, mode=mode, warnings=warnings, pdf_path=pdf_path)
 
     @staticmethod
     def _restore_order(
