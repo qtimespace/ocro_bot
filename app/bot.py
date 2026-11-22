@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from app.config import Settings, get_settings
 from app.handlers import AccessMiddleware, JobLimiter, UserModeStore, create_router
 from app.services.ai_validator import AIValidator
-from app.services.ocr_engine import OcrEngine, PaddleOcrEngine
+from app.services.ocr_engine import OcrEngine, create_ocr_engine
 from app.services.pipeline import Pipeline, cleanup_stale_jobs
 from app.services.preprocessing import validate_steps
 
@@ -73,7 +73,7 @@ def build_dispatcher(settings: Settings, ocr_engine: OcrEngine, validator: AIVal
     return dp
 
 
-async def _warmup(engine: PaddleOcrEngine) -> None:
+async def _warmup(engine) -> None:
     try:
         await asyncio.to_thread(engine.warmup)
     except Exception:
@@ -101,10 +101,7 @@ async def main() -> None:
     if removed:
         log.info("Removed %d stale job directories", removed)
 
-    engine = PaddleOcrEngine(
-        settings.languages, enable_mkldnn=settings.ocr_enable_mkldnn, det_model=settings.ocr_det_model.strip(),
-        rec_model=settings.ocr_rec_model.strip(),
-    )
+    engine = create_ocr_engine(settings)
     validator = None
     if settings.ai_available:
         validator = AIValidator(

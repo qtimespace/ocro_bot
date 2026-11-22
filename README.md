@@ -1,7 +1,7 @@
 # Telegram OCR Bot
 
 Telegram-бот принимает фото, изображения и PDF, распознаёт русский и английский печатный текст
-локально (PaddleOCR), при необходимости проверяет результат с помощью ИИ и возвращает файл Word (`.docx`).
+локально (модели PaddleOCR PP-OCRv5 через ONNX Runtime), при необходимости проверяет результат с помощью ИИ и возвращает файл Word (`.docx`).
 
 Реализация по [ТЗ](docs/ТЗ_Telegram_OCR_Bot.md). Целевая нагрузка — до 50 страниц в сутки.
 
@@ -17,7 +17,8 @@ Telegram-бот принимает фото, изображения и PDF, ра
   с сохранением страниц на диск. Дополнительные шаги для OCR (`contrast`, `denoise`, `binarize`,
   `grayscale`) включаются через `OCR_PREPROCESS` и применяются только к копии для OCR: в DOCX
   попадает исходное изображение.
-- OCR: PaddleOCR 3.x (поддерживается и API 2.x), восстановление порядка строк по координатам,
+- OCR: модели PP-OCRv5 через ONNX Runtime (RapidOCR); запасной движок — PaddleOCR (`OCR_BACKEND=paddle`).
+  Восстановление порядка строк по координатам,
   предупреждения о фрагментах с низкой уверенностью и о страницах без текста.
 - AI-проверка (`/mode`):
   - `off` — только локальный OCR, внешний API не вызывается;
@@ -63,7 +64,7 @@ app/
   services/
     file_parser.py        проверка формата и лимитов, изображения/PDF → PNG-страницы
     preprocessing.py      расширяемая предобработка для OCR
-    ocr_engine.py         PaddleOCR (API 2.x/3.x), порядок чтения
+    ocr_engine.py         OCR: ONNX Runtime (RapidOCR) или PaddleOCR, порядок чтения
     ai_validator.py       AI-проверка (OpenAI), защитные правила
     document_builder.py   генерация DOCX (facsimile / editable)
     pipeline.py           оркестрация задания, временный каталог, очистка
@@ -81,7 +82,7 @@ Dockerfile, docker-compose.yml
 - Linux VPS (рекомендуется Ubuntu 22.04/24.04 LTS), Python 3.11.
 - 2–4 vCPU, 4–8 ГБ RAM. Пик памяти при OCR одной страницы — около 1 ГБ.
 - Исходящий HTTPS к `api.telegram.org`; при AI-проверке — к `api.openai.com`.
-- При первом запуске PaddleOCR скачивает модели (~200 МБ) в `~/.paddlex`.
+- Модели OCR (~20 МБ) скачиваются при первом запуске (в Docker — при сборке образа).
 
 ## Установка на VPS
 
@@ -121,7 +122,13 @@ sudo -u ocrbot nano .env
 | `OCR_LANGUAGES` | `ru,en` | языки OCR |
 | `OCR_MIN_CONFIDENCE` | `0.6` | порог уверенности для предупреждений |
 | `OCR_PREPROCESS` | пусто | шаги предобработки: `grayscale,contrast,denoise,binarize` |
-| `OCR_DET_MODEL`, `OCR_REC_MODEL` | `PP-OCRv5_mobile_det`, авто | модели PaddleOCR (см. «Совместимость») |
+| `OCR_BACKEND` | `onnx` | `onnx` (быстро, мало памяти) или `paddle` |
+| `OCR_REC_LANG` | авто (`eslav`) | модель распознавания для onnx: `eslav`, `cyrillic`, `en`, `latin` |
+| `OCR_DET_LIMIT_SIDE` | `1280` | ограничение входа детектора текста, 0 — без ограничения |
+| `OCR_ORIENTATION` | `false` | классификаторы ориентации (только для повёрнутых фото) |
+| `PAGE_MAX_SIDE` | `0` | ограничение длинной стороны страницы; на слабом сервере — `2000` |
+| `AI_CONCURRENCY` | `4` | сколько страниц одновременно проверяет ИИ |
+| `OCR_DET_MODEL`, `OCR_REC_MODEL` | `PP-OCRv5_mobile_det`, авто | модели для `OCR_BACKEND=paddle` |
 | `OCR_ENABLE_MKLDNN` | `false` | ускорение oneDNN на CPU (включать после проверки) |
 | `MAX_UPLOAD_MB` / `MAX_PDF_PAGES` / `MAX_IMAGE_PIXELS` | `20` / `30` / `40000000` | лимиты |
 | `PDF_DPI` | `200` | разрешение рендера PDF |
@@ -148,7 +155,7 @@ sudo -u ocrbot .venv/bin/python -m app.bot
 
 ```bash
 .venv/bin/pytest -q                       # модульные и интеграционные тесты с моками (~10 с)
-RUN_OCR_TESTS=1 .venv/bin/pytest -q -m ocr  # с настоящим PaddleOCR: русский, английский, 2-страничный PDF
+RUN_OCR_TESTS=1 .venv/bin/pytest -q -m ocr  # с настоящим OCR: русский, английский, 2-страничный PDF
 ```
 
 Тесты не требуют токена Telegram и не обращаются к OpenAI. OCR-тестам нужен шрифт с кириллицей
@@ -181,8 +188,7 @@ docker compose logs -f
 docker compose run --rm bot pytest -q   # тесты внутри контейнера
 ```
 
-Временный каталог в контейнере — `tmpfs` (в RAM, исчезает при остановке), модели PaddleOCR
-хранятся в volume `paddle-models`.
+Временный каталог в контейнере — `tmpfs` (в RAM, исчезает при остановке). Модели ONNX входят в образ.
 
 ## Временные файлы и политика хранения
 
@@ -207,7 +213,24 @@ docker compose run --rm bot pytest -q   # тесты внутри контейн
 - Telegram Bot API позволяет боту скачивать файлы только до 20 МБ. Чтобы поднять `MAX_UPLOAD_MB`
   выше 20, нужен собственный Bot API server.
 
-## Совместимость PaddleOCR
+## Производительность на слабом сервере
+
+Целевое железо — VPS с 1 vCPU и 1,6 ГБ RAM. Замер на странице A4 (Times 12 pt, 200 dpi), 1 vCPU AMD EPYC:
+
+| Конфигурация | Время страницы | Пик памяти | Распознано слов |
+| --- | --- | --- | --- |
+| PaddleOCR, классификаторы ориентации включены | 35,7 с | 1252 МБ | 42% |
+| PaddleOCR, ориентация выключена | 34,2 с | 1160 МБ | 98,8% |
+| PaddleOCR, ориентация выключена, вход детектора 1280 px | 27,8 с | 712 МБ | 98,8% |
+| **ONNX Runtime (RapidOCR), те же модели PP-OCRv5** | **8,4 с** | **456 МБ** | **98,8%** |
+
+Отсюда настройки по умолчанию: `OCR_BACKEND=onnx`, `OCR_ORIENTATION=false` (классификаторы ориентации
+на ровных сканах ошибочно переворачивают строки), `OCR_DET_LIMIT_SIDE=1280`.
+
+## Совместимость PaddleOCR (необязательный движок)
+
+Ставится отдельно: `pip install -r requirements-paddle.txt` (в отдельное окружение — пакет тянет
+`opencv-contrib-python`, который конфликтует с `opencv-python-headless`).
 
 Проверено: `paddlepaddle==3.3.1`, `paddleocr==3.7.0` на CPU. Выявленные особенности:
 

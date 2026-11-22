@@ -1,8 +1,8 @@
-"""Локальный OCR на PaddleOCR (FR-05).
+"""Локальный OCR (FR-05): модели PaddleOCR PP-OCRv5.
 
-Поддерживаются API PaddleOCR 2.x (`ocr()`) и 3.x (`predict()`). Модель загружается лениво
-и один раз; вызовы сериализуются блокировкой, так как инференс Paddle не потокобезопасен.
-Распознанный текст в лог не пишется.
+Основной движок — ONNX Runtime (RapidOCR): в 3 раза быстрее и экономнее по памяти на слабом CPU.
+Запасной — PaddleOCR 2.x/3.x (OCR_BACKEND=paddle). Модель загружается лениво и один раз;
+вызовы сериализуются блокировкой. Распознанный текст в лог не пишется.
 """
 
 import logging
@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 DEFAULT_DET_MODEL = "PP-OCRv5_mobile_det"
 # Если задана модель детекции, PaddleOCR 3.x игнорирует `lang` — модель распознавания нужно указать явно.
 # eslav (восточнославянская) модель распознаёт кириллицу и латиницу.
+DEFAULT_DET_LIMIT_SIDE = 1280
 REC_MODELS = {"ru": "eslav_PP-OCRv5_mobile_rec", "en": "en_PP-OCRv5_mobile_rec"}
 
 
@@ -145,8 +146,16 @@ class PaddleOcrEngine:
         enable_mkldnn: bool = False,
         det_model: str = DEFAULT_DET_MODEL,
         rec_model: str = "",
+        orientation: bool = False,
+        det_limit_side: int = DEFAULT_DET_LIMIT_SIDE,
     ):
         self.lang = paddle_language(languages)
+        # Классификаторы ориентации на ровных сканах теряют до половины слов (замер на 1 vCPU:
+        # 42% слов против 98,8%) и тратят время — включаются только явно, для фото «вверх ногами».
+        self.orientation = orientation
+        # Вход детектора текста ограничивается по длинной стороне: −20% времени, −40% памяти
+        # при той же точности на A4 200 dpi. 0 — без ограничения.
+        self.det_limit_side = det_limit_side
         self.det_model = det_model
         self.rec_model = rec_model or (REC_MODELS.get(self.lang, "") if det_model else "")
         if det_model and not self.rec_model:
@@ -164,23 +173,29 @@ class PaddleOcrEngine:
             raise OcrError("PaddleOCR is not installed") from exc
         try:
             # PaddleOCR 3.x
+            limits = (
+                {"text_det_limit_type": "max", "text_det_limit_side_len": self.det_limit_side}
+                if self.det_limit_side else {}
+            )
             self._engine = PaddleOCR(
                 lang=self.lang,
-                use_doc_orientation_classify=True,
+                use_doc_orientation_classify=self.orientation,
                 use_doc_unwarping=False,
-                use_textline_orientation=True,
+                use_textline_orientation=self.orientation,
                 enable_mkldnn=self.enable_mkldnn,
+                **limits,
                 **self._model_names(),
             )
             self._api_v3 = hasattr(self._engine, "predict")
         except (TypeError, ValueError):
             # PaddleOCR 2.x не знает новых параметров.
             self._engine = PaddleOCR(
-                use_angle_cls=True, lang=self.lang, show_log=False, enable_mkldnn=self.enable_mkldnn
+                use_angle_cls=self.orientation, lang=self.lang, show_log=False, enable_mkldnn=self.enable_mkldnn
             )
             self._api_v3 = False
-        log.info("PaddleOCR loaded: lang=%s api=%s det=%s rec=%s", self.lang, "3.x" if self._api_v3 else "2.x",
-                 self.det_model or "default", self.rec_model or "default")
+        log.info("PaddleOCR loaded: lang=%s api=%s det=%s rec=%s orientation=%s det_limit=%s", self.lang,
+                 "3.x" if self._api_v3 else "2.x", self.det_model or "default", self.rec_model or "default",
+                 self.orientation, self.det_limit_side or "none")
 
     def _model_names(self) -> dict[str, str]:
         names = {}
@@ -209,3 +224,91 @@ class PaddleOcrEngine:
             except Exception as exc:
                 raise OcrError(f"OCR failed: {type(exc).__name__}") from exc
         return OcrResult(rows=order_fragments(parse_paddle_output(raw)))
+
+
+# --- ONNX Runtime (RapidOCR) ----------------------------------------------------------
+#
+# Те же модели PP-OCRv5, но через ONNX Runtime: на 1 vCPU страница A4 распознаётся за ~8 с
+# вместо ~28 с у Paddle Inference, пик памяти ~460 МБ вместо ~710 МБ, точность та же.
+
+# Модели распознавания RapidOCR по языку: обе распознают кириллицу и латиницу.
+RAPID_REC_LANGS = {"ru": "eslav", "en": "en"}
+
+
+class RapidOcrEngine:
+    def __init__(
+        self,
+        languages: Sequence[str],
+        *,
+        det_limit_side: int = DEFAULT_DET_LIMIT_SIDE,
+        orientation: bool = False,
+        rec_lang: str = "",
+    ):
+        self.rec_lang = rec_lang or RAPID_REC_LANGS.get(paddle_language(languages), "eslav")
+        self.det_limit_side = det_limit_side
+        self.orientation = orientation
+        self._engine: Any = None
+        self._lock = threading.Lock()
+
+    def _load(self) -> None:
+        try:
+            from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
+        except ImportError as exc:
+            raise OcrError("RapidOCR is not installed") from exc
+        params: dict[str, Any] = {
+            "Global.use_cls": self.orientation,
+            "Det.ocr_version": OCRVersion.PPOCRV5,
+            "Det.model_type": ModelType.MOBILE,
+            "Rec.ocr_version": OCRVersion.PPOCRV5,
+            "Rec.model_type": ModelType.MOBILE,
+            "Rec.lang_type": LangRec(self.rec_lang),
+        }
+        if self.det_limit_side:
+            params.update({"Det.limit_type": "max", "Det.limit_side_len": self.det_limit_side})
+        self._engine = RapidOCR(params=params)
+        log.info("RapidOCR (ONNX) loaded: rec=%s orientation=%s det_limit=%s", self.rec_lang, self.orientation,
+                 self.det_limit_side or "none")
+
+    def warmup(self) -> None:
+        with self._lock:
+            if self._engine is None:
+                self._load()
+
+    def recognize(self, image: np.ndarray) -> OcrResult:
+        with self._lock:
+            try:
+                if self._engine is None:
+                    self._load()
+                result = self._engine(image)
+            except OcrError:
+                raise
+            except Exception as exc:
+                raise OcrError(f"OCR failed: {type(exc).__name__}") from exc
+        return OcrResult(rows=order_fragments(parse_rapid_output(result)))
+
+
+def parse_rapid_output(result: Any) -> list[OcrLine]:
+    boxes = getattr(result, "boxes", None)
+    texts = getattr(result, "txts", None)
+    scores = getattr(result, "scores", None)
+    if boxes is None or texts is None:
+        return []
+    scores = list(scores) if scores is not None else [1.0] * len(texts)
+    return [
+        OcrLine(text=str(text).strip(), confidence=float(score), box=_box_from_points(box))
+        for box, text, score in zip(boxes, texts, scores)
+    ]
+
+
+def create_ocr_engine(settings: Any) -> "RapidOcrEngine | PaddleOcrEngine":
+    """Движок OCR по настройке OCR_BACKEND: onnx (по умолчанию) или paddle."""
+    if settings.ocr_backend == "paddle":
+        return PaddleOcrEngine(
+            settings.languages, enable_mkldnn=settings.ocr_enable_mkldnn, det_model=settings.ocr_det_model.strip(),
+            rec_model=settings.ocr_rec_model.strip(), orientation=settings.ocr_orientation,
+            det_limit_side=settings.ocr_det_limit_side,
+        )
+    return RapidOcrEngine(
+        settings.languages, det_limit_side=settings.ocr_det_limit_side, orientation=settings.ocr_orientation,
+        rec_lang=settings.ocr_rec_lang.strip(),
+    )

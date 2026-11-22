@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     ocr_enable_mkldnn: bool = Field(default=False, alias="OCR_ENABLE_MKLDNN")
     ocr_det_model: str = Field(default="PP-OCRv5_mobile_det", alias="OCR_DET_MODEL")
     ocr_rec_model: str = Field(default="", alias="OCR_REC_MODEL")
+    # onnx — ONNX Runtime (RapidOCR), быстрый и лёгкий; paddle — PaddleOCR (нужен requirements-paddle.txt).
+    ocr_backend: Literal["onnx", "paddle"] = Field(default="onnx", alias="OCR_BACKEND")
+    # Модель распознавания для onnx: eslav (по умолчанию для ru), cyrillic, en, latin.
+    ocr_rec_lang: str = Field(default="", alias="OCR_REC_LANG")
+    ocr_orientation: bool = Field(default=False, alias="OCR_ORIENTATION")
+    ocr_det_limit_side: int = Field(default=1280, ge=0, alias="OCR_DET_LIMIT_SIDE")
     strip_word_comments: bool = Field(default=True, alias="STRIP_WORD_COMMENTS")
     ocr_deskew: bool = Field(default=True, alias="OCR_DESKEW")
     detect_tables: bool = Field(default=True, alias="DETECT_TABLES")
@@ -58,7 +64,7 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )
 
-    @field_validator("ai_validation_mode", "docx_mode", "log_level", "ai_provider", mode="before")
+    @field_validator("ai_validation_mode", "docx_mode", "log_level", "ai_provider", "ocr_backend", mode="before")
     @classmethod
     def _normalize(cls, value):
         return value.strip().lower() if isinstance(value, str) else value

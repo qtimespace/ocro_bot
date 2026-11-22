@@ -1,0 +1,4 @@
+# Необязательный движок PaddleOCR (OCR_BACKEND=paddle). Медленнее ONNX на CPU, нужен только для сравнения.
+# Внимание: тянет opencv-contrib-python — ставьте в отдельное окружение, чтобы не было двух пакетов cv2.
+paddlepaddle==3.3.1
+paddleocr==3.7.0

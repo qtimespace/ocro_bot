@@ -84,3 +84,66 @@ def test_rec_model_follows_language_when_det_model_set():
     assert PaddleOcrEngine(["ru"], det_model="").rec_model == ""
     with pytest.raises(ValueError):
         PaddleOcrEngine(["de"])
+
+
+def test_paddle_v3_called_with_fast_defaults(monkeypatch):
+    import sys
+    import types
+
+    captured = {}
+
+    class FakePaddle:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def predict(self, image):
+            return []
+
+    monkeypatch.setitem(sys.modules, "paddleocr", types.SimpleNamespace(PaddleOCR=FakePaddle))
+    PaddleOcrEngine(["ru"]).recognize(np.zeros((10, 10, 3), dtype=np.uint8))
+    assert captured["use_doc_orientation_classify"] is False
+    assert captured["use_textline_orientation"] is False
+    assert captured["text_det_limit_type"] == "max" and captured["text_det_limit_side_len"] == 1280
+
+    captured.clear()
+    PaddleOcrEngine(["ru"], orientation=True, det_limit_side=0).recognize(np.zeros((10, 10, 3), dtype=np.uint8))
+    assert captured["use_textline_orientation"] is True
+    assert "text_det_limit_type" not in captured
+
+
+def test_parse_rapid_output():
+    from types import SimpleNamespace
+
+    from app.services.ocr_engine import parse_rapid_output
+
+    result = SimpleNamespace(
+        boxes=np.array([[[10, 50], [90, 50], [90, 70], [10, 70]], [[10, 10], [90, 10], [90, 30], [10, 30]]]),
+        txts=("второй", "first"), scores=(0.9, 0.5),
+    )
+    fragments = parse_rapid_output(result)
+    assert [(f.text, f.confidence) for f in fragments] == [("второй", 0.9), ("first", 0.5)]
+    assert fragments[1].box == (10, 10, 90, 30)
+    assert parse_rapid_output(SimpleNamespace(boxes=None, txts=None, scores=None)) == []
+
+
+def test_engine_factory(tmp_path):
+    from app.services.ocr_engine import RapidOcrEngine, create_ocr_engine
+    from tests.conftest import make_settings
+
+    onnx = create_ocr_engine(make_settings(tmp_path))
+    assert isinstance(onnx, RapidOcrEngine) and onnx.rec_lang == "eslav" and onnx.det_limit_side == 1280
+    assert create_ocr_engine(make_settings(tmp_path, OCR_REC_LANG="cyrillic")).rec_lang == "cyrillic"
+    assert isinstance(create_ocr_engine(make_settings(tmp_path, OCR_BACKEND="paddle")), PaddleOcrEngine)
+
+
+def test_rapid_engine_wraps_errors():
+    from app.services.ocr_engine import RapidOcrEngine
+
+    class Broken:
+        def __call__(self, image):
+            raise RuntimeError("boom")
+
+    engine = RapidOcrEngine(["ru"])
+    engine._engine = Broken()
+    with pytest.raises(OcrError):
+        engine.recognize(np.zeros((10, 10, 3), dtype=np.uint8))

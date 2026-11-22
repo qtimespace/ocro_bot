@@ -48,10 +48,14 @@ def _similarity(a: str, b: str) -> float:
 
 @pytest.fixture(scope="module")
 def engine():
-    pytest.importorskip("paddleocr")
-    from app.services.ocr_engine import PaddleOcrEngine
+    """Основной движок — ONNX (RapidOCR); при OCR_TEST_BACKEND=paddle — PaddleOCR."""
+    from app.services.ocr_engine import PaddleOcrEngine, RapidOcrEngine
 
-    return PaddleOcrEngine(["ru", "en"])
+    if os.environ.get("OCR_TEST_BACKEND") == "paddle":
+        pytest.importorskip("paddleocr")
+        return PaddleOcrEngine(["ru", "en"])
+    pytest.importorskip("rapidocr")
+    return RapidOcrEngine(["ru", "en"])
 
 
 RU = ["Договор поставки № 15/2026", "Дата: 19.10.2026", "Сумма: 125 000,00 руб."]
