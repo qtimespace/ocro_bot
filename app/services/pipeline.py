@@ -71,6 +71,22 @@ def _format_ai_warning(page_no: int, fragment: str, reason: str) -> str:
     return f"Страница {page_no}: {reason}"
 
 
+def measure_ink(ocr: OcrResult, gray) -> None:
+    """Доля тёмных пикселей в рамке каждого фрагмента (признак жирного шрифта); интегральное изображение — O(1) на рамку."""
+    if gray is None or gray.size == 0:
+        return
+    _, binary = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    integral = cv2.integral(binary)
+    h, w = gray.shape[:2]
+    for fragment in ocr.fragments:
+        x0, y0 = max(0, int(fragment.box[0])), max(0, int(fragment.box[1]))
+        x1, y1 = min(w, int(fragment.box[2])), min(h, int(fragment.box[3]))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        dark = integral[y1, x1] - integral[y0, x1] - integral[y1, x0] + integral[y0, x0]
+        fragment.ink = float(dark) / ((x1 - x0) * (y1 - y0))
+
+
 @dataclass
 class PageScan:
     """Результат обработки страницы до AI-проверки."""
@@ -98,6 +114,7 @@ class Pipeline:
             image, gray = rotate(image, skew), rotate(gray, skew)
         tables = detect_tables(gray, image) if s.detect_tables else []
         scan = PageScan(ocr=self.ocr_engine.recognize(erase_table_lines(image, tables)), skew=skew)
+        measure_ink(scan.ocr, gray)
 
         cut = None
         if s.strip_word_comments:
@@ -175,11 +192,8 @@ class Pipeline:
         results: list[PageResult] = []
         for page, ocr in recognized:
             scan = scans[id(page)]
-            if scan.tables:
-                blocks = build_blocks(ocr, scan.tables)
-                result = PageResult(page=page, text=blocks_to_text(blocks), blocks=blocks)
-            else:
-                result = PageResult(page=page, text=ocr.text)
+            blocks = build_blocks(ocr, scan.tables, page.height)
+            result = PageResult(page=page, text=blocks_to_text(blocks), blocks=blocks)
             if scan.removed_comments:
                 result.warnings.append(f"Страница {page.index}: примечания Word на полях исключены из текста.")
 
@@ -254,9 +268,8 @@ class Pipeline:
 
     async def _validate(self, result: PageResult, mode: ValidationMode) -> None:
         assert self.validator is not None
-        tables = [b for b in result.blocks if isinstance(b, Table)]
-        # Таблицы передаются ИИ отдельно по ячейкам, в тексте вместо них — метки [[ТАБЛИЦА N]].
-        text = blocks_with_placeholders(result.blocks)[0] if tables else result.text
+        # Абзац — одна строка; таблицы передаются ИИ отдельно по ячейкам, в тексте — метки [[ТАБЛИЦА N]].
+        text, tables = blocks_with_placeholders(result.blocks) if result.blocks else (result.text, [])
         try:
             if mode == "text":
                 checked = await self.validator.validate_text(text, tables=tables)
@@ -268,7 +281,7 @@ class Pipeline:
             log.warning("AI validation failed on page %s: %s", result.page.index, exc)
             result.validation = "failed"
             return
-        if tables:
+        if result.blocks:
             for note in apply_table_fixes(tables, checked.tables):
                 result.warnings.append(f"Страница {result.page.index}: {note}")
             result.blocks = blocks_from_placeholders(checked.corrected_text, tables, result.blocks)

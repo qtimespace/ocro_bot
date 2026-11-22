@@ -78,7 +78,7 @@ def test_build_blocks_places_fragments_in_cells_and_keeps_order():
         frag("Подпись", 100, 650),
     ]])
     blocks = build_blocks(ocr, [t])
-    assert blocks[0] == "Заголовок" and blocks[1] is t and blocks[2] == "Подпись"
+    assert blocks[0].text == "Заголовок" and blocks[1] is t and blocks[2].text == "Подпись"
     cell = {(c.row, c.col): c.text for c in t.cells}
     assert cell[(0, 0)] == "Наименование работ"
     assert cell[(0, 2)] == "Сумма"
@@ -95,9 +95,12 @@ def test_placeholders_roundtrip_and_lost_placeholder_restored():
     blocks = ["До", t, "После"]
     text, tables = blocks_with_placeholders(blocks)
     assert text == "До\n[[ТАБЛИЦА 1]]\nПосле" and tables == [t]
-    assert blocks_from_placeholders("До!\n[[ТАБЛИЦА 1]]\nПосле", tables, blocks) == ["До!", t, "После"]
+    def texts(result):
+        return [b if isinstance(b, Table) else b.text for b in result]
+
+    assert texts(blocks_from_placeholders("До!\n[[ТАБЛИЦА 1]]\nПосле", tables, blocks)) == ["До!", t, "После"]
     # ИИ потерял метку — таблица возвращается на исходное место.
-    assert blocks_from_placeholders("До!\nПосле", tables, blocks) == ["До!", t, "После"]
+    assert texts(blocks_from_placeholders("До!\nПосле", tables, blocks)) == ["До!", t, "После"]
 
 
 def test_apply_table_fixes():
@@ -140,7 +143,7 @@ async def test_pipeline_builds_table_blocks(tmp_path):
     table_page().convert("RGB").save(work / "in", format="PNG")
     result = await Pipeline(settings, TableOcr(), None).run(work / "in", work, "off")
     page = result.pages[0]
-    assert page.blocks[0] == "Акт" and isinstance(page.blocks[1], Table)
+    assert page.blocks[0].text == "Акт" and isinstance(page.blocks[1], Table)
     assert "Итого |  | 100" not in page.text and "Итого | 100" in page.text
     assert len(Document(result.docx_path).tables) == 1
 
@@ -151,7 +154,7 @@ async def test_pipeline_tables_can_be_disabled(tmp_path):
     work.mkdir()
     table_page().convert("RGB").save(work / "in", format="PNG")
     result = await Pipeline(settings, TableOcr(), None).run(work / "in", work, "off")
-    assert result.pages[0].blocks == []
+    assert not any(isinstance(b, Table) for b in result.pages[0].blocks)
 
 
 def color_table_page(underline_rgb=(220, 30, 30)) -> np.ndarray:

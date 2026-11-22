@@ -7,13 +7,14 @@
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
 
-from app.models import Block, OcrLine, OcrResult, Table, TableCell
+from app.models import Block, OcrLine, OcrResult, Paragraph, Table, TableCell
 from app.services.ocr_engine import order_fragments
+from app.services.paragraphs import build_paragraphs
 
 MAX_DESKEW_DEGREES = 10.0
 MIN_DESKEW_DEGREES = 0.15
@@ -416,7 +417,7 @@ def _cell_at(table: Table, row: int, col: int) -> TableCell | None:
     return None
 
 
-def build_blocks(ocr: OcrResult, tables: list[Table]) -> list[Block]:
+def build_blocks(ocr: OcrResult, tables: list[Table], page_height: float | None = None) -> list[Block]:
     """Строки текста и таблицы в порядке сверху вниз; фрагменты внутри таблиц попадают в ячейки."""
     outside: list[OcrLine] = []
     in_cells: dict[int, dict[int, list[OcrLine]]] = {}
@@ -444,10 +445,9 @@ def build_blocks(ocr: OcrResult, tables: list[Table]) -> list[Block]:
     tables = [t for t in tables if t.rows * t.cols >= 2 and any(c.text for c in t.cells)]
 
     positioned: list[tuple[float, Block]] = []
-    for row in order_fragments(outside):
-        line = " ".join(f.text for f in row if f.text).strip()
-        if line:
-            positioned.append((min(f.box[1] for f in row), line))
+    barriers = [(t.box[1], t.box[3]) for t in tables]
+    for paragraph in build_paragraphs(order_fragments(outside), barriers, page_height):
+        positioned.append((paragraph.top, paragraph))
     for table in tables:
         positioned.append((table.box[1], table))
     positioned.sort(key=lambda item: item[0])
@@ -462,13 +462,20 @@ def table_to_text(table: Table) -> str:
     return "\n".join(lines)
 
 
+def block_text(block: Block) -> str:
+    if isinstance(block, Table):
+        return table_to_text(block)
+    if isinstance(block, Paragraph):
+        return block.text
+    return block
+
+
 def blocks_to_text(blocks: Iterable[Block]) -> str:
-    parts = [block if isinstance(block, str) else table_to_text(block) for block in blocks]
-    return "\n".join(p for p in parts if p).strip()
+    return "\n".join(t for t in (block_text(b) for b in blocks) if t).strip()
 
 
 def blocks_with_placeholders(blocks: list[Block]) -> tuple[str, list[Table]]:
-    """Текст страницы для ИИ: таблицы заменены метками [[ТАБЛИЦА N]]."""
+    """Текст страницы для ИИ: абзац — одна строка, таблицы заменены метками [[ТАБЛИЦА N]]."""
     lines: list[str] = []
     tables: list[Table] = []
     for block in blocks:
@@ -476,12 +483,19 @@ def blocks_with_placeholders(blocks: list[Block]) -> tuple[str, list[Table]]:
             tables.append(block)
             lines.append(TABLE_PLACEHOLDER.format(n=len(tables)))
         else:
-            lines.append(block)
+            lines.append(block_text(block).replace("\n", " "))
     return "\n".join(lines), tables
 
 
 def blocks_from_placeholders(text: str, tables: list[Table], original: list[Block]) -> list[Block]:
-    """Обратная сборка после ИИ. Потерянные метки таблиц возвращаются на исходные места."""
+    """Обратная сборка после ИИ. Потерянные метки таблиц возвращаются на исходные места.
+
+    Если число абзацев не изменилось, исправленный текст ложится в исходные абзацы с их оформлением.
+    """
+    original_paragraphs = [b for b in original if not isinstance(b, Table)]
+    text_lines = [ln for ln in text.splitlines() if ln.strip() and not PLACEHOLDER_RE.match(ln)]
+    keep_style = len(text_lines) == len(original_paragraphs)
+    styled = iter(original_paragraphs)
     blocks: list[Block] = []
     used: set[int] = set()
     for line in text.splitlines():
@@ -493,7 +507,13 @@ def blocks_from_placeholders(text: str, tables: list[Table], original: list[Bloc
                 used.add(n)
             continue
         if line.strip():
-            blocks.append(line)
+            source = next(styled) if keep_style else None
+            if isinstance(source, Paragraph):
+                # Текст не изменился — оставляем исходный (с переносами строк в блоках по центру/справа).
+                unchanged = " ".join(source.text.split()) == " ".join(line.split())
+                blocks.append(source if unchanged else replace(source, text=line.strip()))
+            else:
+                blocks.append(Paragraph(text=line.strip()))
     for n, table in enumerate(tables, start=1):
         if n in used:
             continue

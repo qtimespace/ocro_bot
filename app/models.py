@@ -63,6 +63,8 @@ class OcrLine:
     confidence: float = 1.0
     # Ограничивающий прямоугольник (x0, y0, x1, y1) в пикселях страницы.
     box: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    # Доля тёмных пикселей в рамке фрагмента — признак жирного начертания (0 — не измерялась).
+    ink: float = 0.0
 
 
 @dataclass
@@ -117,8 +119,26 @@ class Table:
     segments: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
-# Блок страницы: строка текста или таблица.
-Block = str | Table
+ParagraphStyle = Literal["body", "heading1", "heading2"]
+Alignment = Literal["left", "center", "right", "justify"]
+
+
+@dataclass(eq=False)
+class Paragraph:
+    """Абзац, собранный из строк OCR, с оценкой оформления."""
+
+    text: str
+    style: ParagraphStyle = "body"
+    align: Alignment = "left"
+    size_pt: float | None = None
+    bold: bool = False
+    indent: bool = False  # красная строка
+    top: float = 0.0  # верх первой строки на странице, для порядка блоков
+    lines: int = 1
+
+
+# Блок страницы: абзац, таблица или строка текста (простой абзац).
+Block = Paragraph | str | Table
 
 
 @dataclass

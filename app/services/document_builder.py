@@ -11,10 +11,10 @@ from pathlib import Path
 from docx import Document
 from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Emu, Inches, Pt
+from docx.shared import Cm, Emu, Inches, Pt, RGBColor
 from PIL import Image
 
-from app.models import DocxMode, PageResult, Table
+from app.models import DocxMode, PageResult, Paragraph, Table
 
 # Символы, недопустимые в XML 1.0 (python-docx на них падает).
 _INVALID_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
@@ -80,6 +80,33 @@ def _add_table(doc, table: Table) -> None:
     doc.add_paragraph()  # отступ после таблицы, чтобы следующий текст не прилипал
 
 
+ALIGNMENTS = {
+    "left": WD_ALIGN_PARAGRAPH.LEFT, "center": WD_ALIGN_PARAGRAPH.CENTER,
+    "right": WD_ALIGN_PARAGRAPH.RIGHT, "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+}
+HEADING_STYLES = {"heading1": "Heading 1", "heading2": "Heading 2"}
+
+
+def _add_paragraph(doc, block: Paragraph) -> None:
+    style = HEADING_STYLES.get(block.style)
+    p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+    p.alignment = ALIGNMENTS.get(block.align, WD_ALIGN_PARAGRAPH.LEFT)
+    p.paragraph_format.space_after = Pt(6)
+    if block.indent:
+        p.paragraph_format.first_line_indent = Cm(1.25)
+    for i, line in enumerate(clean_text(block.text).split("\n")):
+        run = p.add_run()
+        if i:
+            run.add_break()  # перенос строки внутри абзаца (блоки по центру и справа)
+        run.add_text(line)
+        if block.bold:
+            run.bold = True
+        if block.size_pt:
+            run.font.size = Pt(block.size_pt)
+        if style:
+            run.font.color.rgb = RGBColor(0, 0, 0)  # стиль заголовка Word, но без синего цвета
+
+
 def _add_page_content(doc, page: PageResult) -> None:
     if not page.blocks:
         _add_lines(doc, page.text)
@@ -87,6 +114,8 @@ def _add_page_content(doc, page: PageResult) -> None:
     for block in page.blocks:
         if isinstance(block, Table):
             _add_table(doc, block)
+        elif isinstance(block, Paragraph):
+            _add_paragraph(doc, block)
         else:
             p = doc.add_paragraph(clean_text(block))
             p.paragraph_format.space_after = Pt(0)
