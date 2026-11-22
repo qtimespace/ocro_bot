@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # Каталог со словарями в подкаталоге hunspell/ (ru_RU.aff/.dic, en_US.aff/.dic). Пусто — системные словари.
     spell_dict_dir: str = Field(default="", alias="SPELL_DICT_DIR")
     ocr_deskew: bool = Field(default=True, alias="OCR_DESKEW")
+    # Модель анализа макета (ONNX, rapid-layout): колонки, заголовки, рисунки. Пусто — только геометрия.
+    layout_model: str = Field(default="yolov8n_layout_general6", alias="LAYOUT_MODEL")
+    # Вставлять рисунки со страниц (схемы, логотипы, печати) в DOCX картинками.
+    insert_figures: bool = Field(default=True, alias="INSERT_FIGURES")
     detect_tables: bool = Field(default=True, alias="DETECT_TABLES")
 
     max_upload_mb: int = Field(default=20, gt=0, alias="MAX_UPLOAD_MB")

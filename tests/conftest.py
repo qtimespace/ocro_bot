@@ -22,6 +22,7 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         "DATA_DIR": "",
         "SPELLCHECK": "false",
         "SEARCHABLE_PDF": "false",
+        "LAYOUT_MODEL": "",
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)

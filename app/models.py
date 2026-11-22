@@ -135,10 +135,34 @@ class Paragraph:
     indent: bool = False  # красная строка
     top: float = 0.0  # верх первой строки на странице, для порядка блоков
     lines: int = 1
+    # Рамка абзаца на странице (для порядка чтения при колонках).
+    left: float = 0.0
+    right: float = 0.0
+    bottom: float = 0.0
 
 
-# Блок страницы: абзац, таблица или строка текста (простой абзац).
-Block = Paragraph | str | Table
+@dataclass(eq=False)
+class Figure:
+    """Рисунок со страницы (схема, логотип, печать), вставляется в DOCX картинкой."""
+
+    path: Path
+    width: int
+    height: int
+    box: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    page_width: int = 0  # ширина страницы в пикселях — для масштаба в документе
+
+
+@dataclass
+class Region:
+    """Блок макета, найденный моделью: text | title | figure | table | caption | other."""
+
+    label: str
+    box: tuple[float, float, float, float]
+    score: float = 1.0
+
+
+# Блок страницы: абзац, таблица, рисунок или строка текста (простой абзац).
+Block = Paragraph | str | Table | Figure
 
 
 @dataclass

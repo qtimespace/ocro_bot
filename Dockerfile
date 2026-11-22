@@ -15,10 +15,13 @@ WORKDIR /app
 
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install -r requirements-dev.txt
+# Анализ макета: без зависимостей, иначе пакет тянет второй OpenCV (opencv-python рядом с headless).
+RUN pip install --no-deps rapid-layout==1.2.1
 
 COPY app ./app
 # Модели OCR (ONNX, ~20 МБ) скачиваются при сборке: бот стартует без сети к хостингам моделей.
-RUN python -c "from app.services.ocr_engine import RapidOcrEngine; RapidOcrEngine(['ru', 'en']).warmup()"
+RUN python -c "from app.services.ocr_engine import RapidOcrEngine; RapidOcrEngine(['ru', 'en']).warmup()" \
+    && python -c "from app.services.layout import LayoutDetector; LayoutDetector().warmup()"
 COPY tests ./tests
 COPY pytest.ini .env.example ./
 # Каталоги заранее с владельцем ocrbot: Docker копирует права в новые тома при первом подключении.

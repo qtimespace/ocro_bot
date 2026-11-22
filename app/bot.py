@@ -73,11 +73,14 @@ def build_dispatcher(settings: Settings, ocr_engine: OcrEngine, validator: AIVal
     return dp
 
 
-async def _warmup(engine) -> None:
-    try:
-        await asyncio.to_thread(engine.warmup)
-    except Exception:
-        log.exception("OCR warmup failed; the model will be loaded on first request")
+async def _warmup(engine, layout=None) -> None:
+    for name, model in (("OCR", engine), ("Layout", layout)):
+        if model is None:
+            continue
+        try:
+            await asyncio.to_thread(model.warmup)
+        except Exception:
+            log.exception("%s warmup failed; the model will be loaded on first request", name)
 
 
 async def main() -> None:
@@ -113,7 +116,7 @@ async def main() -> None:
         )
     dp = build_dispatcher(settings, engine, validator)
     bot = Bot(token)
-    warmup = asyncio.create_task(_warmup(engine))
+    warmup = asyncio.create_task(_warmup(engine, dp["pipeline"].layout))
     try:
         await bot.set_my_commands([
             BotCommand(command="start", description="Как пользоваться ботом"),

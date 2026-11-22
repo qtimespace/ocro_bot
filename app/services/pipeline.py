@@ -20,10 +20,11 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from app.models import JobResult, OcrResult, PageImage, PageResult, Table, ValidationMode
+from app.models import Figure, JobResult, OcrResult, PageImage, PageResult, Region, Table, ValidationMode
 from app.services.ai_validator import AIValidationError, AIValidator, apply_table_fixes
 from app.services.comments import crop_page, find_comment_cut, find_side_column, strip_comments
 from app.services.document_builder import build_docx
+from app.services.layout import LayoutDetector, contains, overlap_ratio
 from app.services.pdf_builder import PdfBuildError, build_searchable_pdf
 from app.services.file_parser import InputFileError, parse_file
 from app.services.ocr_engine import OcrEngine
@@ -38,6 +39,8 @@ from app.services.tables import (
 log = logging.getLogger(__name__)
 
 JOB_PREFIX = "job_"
+# Блок «рисунок», больше чем на эту долю покрытый текстом, — на самом деле текст.
+FIGURE_MAX_TEXT_SHARE = 0.5
 MAX_SUSPICIOUS_SHOWN = 15
 MAX_AI_HINTS = 60
 ProgressCallback = Callable[[str], Awaitable[None]]
@@ -77,6 +80,19 @@ def _format_ai_warning(page_no: int, fragment: str, reason: str) -> str:
     return f"Страница {page_no}: {reason}"
 
 
+def _without_figures(ocr: OcrResult, figures: list[Figure]) -> OcrResult:
+    """Надписи внутри рисунков (подписи осей, текст логотипа) не попадают в текст документа."""
+    if not figures:
+        return ocr
+    rows = []
+    for row in ocr.rows:
+        kept = [f for f in row if not any(contains(fig.box, (f.box[0] + f.box[2]) / 2, (f.box[1] + f.box[3]) / 2, 0)
+                                          for fig in figures)]
+        if kept:
+            rows.append(kept)
+    return OcrResult(rows=rows)
+
+
 def _rotate_page_file(path: Path, degrees: float) -> None:
     with Image.open(path) as im:
         rotated = rotate(np.asarray(im.convert("RGB")), degrees)
@@ -107,14 +123,18 @@ class PageScan:
     skew: float = 0.0
     removed_comments: int = 0
     tables: list[Table] = field(default_factory=list)
+    regions: list[Region] = field(default_factory=list)
 
 
 class Pipeline:
     def __init__(self, settings: Settings, ocr_engine: OcrEngine, validator: AIValidator | None = None,
-                 speller: SpellChecker | None = None):
+                 speller: SpellChecker | None = None, layout: LayoutDetector | None = None):
         self.settings = settings
         self.ocr_engine = ocr_engine
         self.validator = validator
+        if layout is None and settings.layout_model.strip():
+            layout = LayoutDetector(settings.layout_model.strip())
+        self.layout = layout
         if speller is None and settings.spellcheck:
             speller = SpellChecker.create(settings.languages, settings.spell_dict_dir)
         self.speller = speller
@@ -131,7 +151,8 @@ class Pipeline:
             image, gray = rotate(image, skew), rotate(gray, skew)
             _rotate_page_file(page.path, skew)
         tables = detect_tables(gray, image) if s.detect_tables else []
-        scan = PageScan(ocr=self.ocr_engine.recognize(erase_table_lines(image, tables)), skew=skew)
+        regions = self._detect_layout(image)
+        scan = PageScan(ocr=self.ocr_engine.recognize(erase_table_lines(image, tables)), skew=skew, regions=regions)
         measure_ink(scan.ocr, gray)
 
         cut = None
@@ -145,7 +166,20 @@ class Pipeline:
                 scan.ocr, scan.removed_comments = strip_comments(scan.ocr, cut)
                 page.width, page.height = crop_page(page.path, cut)
         scan.tables = [t for t in tables if cut is None or t.box[0] < cut]
+        if cut is not None:
+            scan.regions = [r for r in scan.regions if r.box[0] < cut]
         return scan
+
+    def _detect_layout(self, image) -> list[Region]:
+        if self.layout is None:
+            return []
+        try:
+            return self.layout.detect(image)
+        except Exception as exc:
+            # Модель макета — подсказка: при сбое (нет пакета, нет модели) работаем геометрией.
+            log.warning("Layout analysis disabled: %s", type(exc).__name__)
+            self.layout = None
+            return []
 
     async def run(
         self,
@@ -212,7 +246,9 @@ class Pipeline:
         results: list[PageResult] = []
         for page, ocr in recognized:
             scan = scans[id(page)]
-            blocks = build_blocks(ocr, scan.tables, page.height)
+            figures = self._extract_figures(page, ocr, scan, work_dir) if s.insert_figures else []
+            text_ocr = _without_figures(ocr, figures)
+            blocks = build_blocks(text_ocr, scan.tables, page.height, scan.regions, figures)
             result = PageResult(page=page, text=blocks_to_text(blocks), blocks=blocks, fragments=ocr.fragments)
             if scan.removed_comments:
                 result.warnings.append(f"Страница {page.index}: примечания Word на полях исключены из текста.")
@@ -281,6 +317,28 @@ class Pipeline:
         for index, (page, _) in enumerate(reordered, start=1):
             page.index = index
         return reordered
+
+    @staticmethod
+    def _extract_figures(page: PageImage, ocr: OcrResult, scan: "PageScan", work_dir: Path) -> list[Figure]:
+        """Рисунки из блоков макета: вырезаются из страницы. Блок, сплошь покрытый текстом, или
+        совпадающий с таблицей — не рисунок (ошибка модели)."""
+        figures: list[Figure] = []
+        for region in scan.regions:
+            if region.label != "figure" or any(overlap_ratio(region.box, t.box) > 0.3 for t in scan.tables):
+                continue
+            x0, y0, x1, y1 = (int(v) for v in region.box)
+            if x1 - x0 < 40 or y1 - y0 < 40:
+                continue
+            text_area = sum(
+                overlap_ratio(f.box, region.box) * (f.box[2] - f.box[0]) * (f.box[3] - f.box[1]) for f in ocr.fragments
+            )
+            if text_area > FIGURE_MAX_TEXT_SHARE * (x1 - x0) * (y1 - y0):
+                continue
+            path = work_dir / f"figure_{page.index:03d}_{len(figures) + 1}.png"
+            with Image.open(page.path) as im:
+                im.crop((max(0, x0), max(0, y0), min(im.width, x1), min(im.height, y1))).save(path, format="PNG")
+            figures.append(Figure(path=path, width=x1 - x0, height=y1 - y0, box=region.box, page_width=page.width))
+        return figures
 
     def _spellcheck(self, result: PageResult, vocab=None) -> None:
         """Безопасные исправления орфографии в тексте страницы и список слов не из словаря."""

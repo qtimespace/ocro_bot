@@ -12,9 +12,10 @@ from dataclasses import dataclass, replace
 import cv2
 import numpy as np
 
-from app.models import Block, OcrLine, OcrResult, Paragraph, Table, TableCell
+from app.models import Block, Figure, OcrLine, OcrResult, Paragraph, Region, Table, TableCell
 from app.services.ocr_engine import order_fragments
-from app.services.paragraphs import build_paragraphs
+from app.services.layout import contains, is_multi_column, overlap_ratio, reading_order
+from app.services.paragraphs import build_paragraphs, page_metrics
 
 MAX_DESKEW_DEGREES = 10.0
 MIN_DESKEW_DEGREES = 0.15
@@ -417,8 +418,17 @@ def _cell_at(table: Table, row: int, col: int) -> TableCell | None:
     return None
 
 
-def build_blocks(ocr: OcrResult, tables: list[Table], page_height: float | None = None) -> list[Block]:
-    """Строки текста и таблицы в порядке сверху вниз; фрагменты внутри таблиц попадают в ячейки."""
+def build_blocks(
+    ocr: OcrResult,
+    tables: list[Table],
+    page_height: float | None = None,
+    regions: list[Region] | None = None,
+    figures: list[Figure] | None = None,
+) -> list[Block]:
+    """Абзацы, таблицы и рисунки страницы в порядке чтения; фрагменты внутри таблиц — в ячейках.
+
+    regions — блоки макета (модель): строки распределяются по блокам текста, абзац не пересекает
+    границу блока, при колонках порядок — по колонкам. Без regions — геометрия сверху вниз."""
     outside: list[OcrLine] = []
     in_cells: dict[int, dict[int, list[OcrLine]]] = {}
     for fragment in ocr.fragments:
@@ -444,14 +454,45 @@ def build_blocks(ocr: OcrResult, tables: list[Table], page_height: float | None 
         _prune_empty_edges(table)
     tables = [t for t in tables if t.rows * t.cols >= 2 and any(c.text for c in t.cells)]
 
-    positioned: list[tuple[float, Block]] = []
-    barriers = [(t.box[1], t.box[3]) for t in tables]
-    for paragraph in build_paragraphs(order_fragments(outside), barriers, page_height):
-        positioned.append((paragraph.top, paragraph))
-    for table in tables:
-        positioned.append((table.box[1], table))
-    positioned.sort(key=lambda item: item[0])
-    return [block for _, block in positioned]
+    figures = figures or []
+    text_regions = [
+        r for r in regions or []
+        if r.label in ("text", "title", "caption") and not any(overlap_ratio(r.box, t.box) > 0.5 for t in tables)
+    ]
+    # Фрагмент — в наименьший блок текста, содержащий его центр; остальные собираются геометрией.
+    by_region: dict[int, list[OcrLine]] = {}
+    for fragment in outside:
+        cx, cy = (fragment.box[0] + fragment.box[2]) / 2, (fragment.box[1] + fragment.box[3]) / 2
+        candidates = [i for i, r in enumerate(text_regions) if contains(r.box, cx, cy)]
+        key = min(candidates, key=lambda i: _area(text_regions[i].box)) if candidates else -1
+        by_region.setdefault(key, []).append(fragment)
+    row_groups = {key: order_fragments(frags) for key, frags in by_region.items()}
+    metrics = page_metrics(list(row_groups.values()))
+    left = metrics.left if metrics else 0.0
+    right = metrics.right if metrics else 1.0
+    columns = is_multi_column(text_regions, left, right)
+
+    barriers = [(t.box[1], t.box[3]) for t in tables] + [(f.box[1], f.box[3]) for f in figures]
+    items: list[tuple[tuple[float, float, float, float], Block]] = []
+    for key, rows in row_groups.items():
+        region_metrics = metrics
+        if columns and key >= 0 and metrics is not None:
+            # В колонке выравнивание и отступы считаются от её границ, а не от полей страницы.
+            box = text_regions[key].box
+            region_metrics = replace(metrics, left=box[0], right=box[2])
+        for paragraph in build_paragraphs(rows, barriers, page_height, region_metrics):
+            if key >= 0 and text_regions[key].label == "title" and paragraph.style == "body":
+                paragraph.style = "heading2"
+            box = text_regions[key].box if key >= 0 else (paragraph.left, paragraph.top, paragraph.right,
+                                                            paragraph.bottom)
+            items.append((box, paragraph))
+    items += [(t.box, t) for t in tables]
+    items += [(f.box, f) for f in figures]
+    return reading_order(items, left, right, columns)
+
+
+def _area(box) -> float:
+    return max(1.0, (box[2] - box[0]) * (box[3] - box[1]))
 
 
 def table_to_text(table: Table) -> str:
@@ -463,6 +504,8 @@ def table_to_text(table: Table) -> str:
 
 
 def block_text(block: Block) -> str:
+    if isinstance(block, Figure):
+        return ""
     if isinstance(block, Table):
         return table_to_text(block)
     if isinstance(block, Paragraph):
@@ -482,6 +525,8 @@ def map_blocks_text(blocks: list[Block], transform) -> list[Block]:
             for cell in block.cells:
                 cell.text = transform(cell.text)
             result.append(block)
+        elif isinstance(block, Figure):
+            result.append(block)
         elif isinstance(block, Paragraph):
             result.append(replace(block, text=transform(block.text)))
         else:
@@ -497,7 +542,7 @@ def blocks_with_placeholders(blocks: list[Block]) -> tuple[str, list[Table]]:
         if isinstance(block, Table):
             tables.append(block)
             lines.append(TABLE_PLACEHOLDER.format(n=len(tables)))
-        else:
+        elif not isinstance(block, Figure):  # рисунки ИИ не передаются — возвращаются на место после
             lines.append(block_text(block).replace("\n", " "))
     return "\n".join(lines), tables
 
@@ -507,7 +552,7 @@ def blocks_from_placeholders(text: str, tables: list[Table], original: list[Bloc
 
     Если число абзацев не изменилось, исправленный текст ложится в исходные абзацы с их оформлением.
     """
-    original_paragraphs = [b for b in original if not isinstance(b, Table)]
+    original_paragraphs = [b for b in original if not isinstance(b, (Table, Figure))]
     text_lines = [ln for ln in text.splitlines() if ln.strip() and not PLACEHOLDER_RE.match(ln)]
     keep_style = len(text_lines) == len(original_paragraphs)
     styled = iter(original_paragraphs)
@@ -536,4 +581,7 @@ def blocks_from_placeholders(text: str, tables: list[Table], original: list[Bloc
             [u for u in used if u < n])
         blocks.insert(min(position, len(blocks)), table)
         used.add(n)
+    for index, block in enumerate(original):  # рисунки — на исходные позиции
+        if isinstance(block, Figure):
+            blocks.insert(min(index, len(blocks)), block)
     return blocks

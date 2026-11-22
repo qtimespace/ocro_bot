@@ -98,17 +98,23 @@ def _drop_page_numbers(lines: list[_Line], page_height: float | None) -> list[_L
             if not (id(ln) in edge and PAGE_NUMBER.match(ln.text) and (ln.y1 < top or ln.y0 > bottom))]
 
 
-def build_paragraphs(
-    rows: list[list[OcrLine]],
-    barriers: list[tuple[float, float]] | None = None,
-    page_height: float | None = None,
-) -> list[Paragraph]:
-    """barriers — вертикальные интервалы (таблицы, рисунки): абзац через них не продолжается."""
-    lines = [line for line in (_to_line(row) for row in rows) if line is not None]
-    lines.sort(key=lambda ln: (ln.y0, ln.x0))
-    lines = _drop_page_numbers(lines, page_height)
+@dataclass
+class PageMetrics:
+    """Поля текста, высота строки, обычный интервал и плотность штрихов основного текста страницы."""
+
+    left: float
+    right: float
+    body_height: float
+    usual_gap: float
+    body_ink: float
+
+
+def page_metrics(row_groups: list[list[list[OcrLine]]]) -> PageMetrics | None:
+    """Метрики по всем строкам страницы (строки уже разбиты по блокам/колонкам)."""
+    lines = [ln for rows in row_groups for ln in (_to_line(r) for r in rows) if ln is not None]
     if not lines:
-        return []
+        return None
+    lines.sort(key=lambda ln: (ln.y0, ln.x0))
     body_height = statistics.median(ln.height for ln in lines)
     if len(lines) >= 8:
         left = _percentile([ln.x0 for ln in lines], 0.1)
@@ -119,7 +125,25 @@ def build_paragraphs(
     # Обычный интервал — не больше высоты строки: иначе при паре строк он берётся из одного большого разрыва.
     usual_gap = min(statistics.median(gaps), body_height) if len(gaps) >= 3 else body_height * 0.5
     inks = [ln.ink for ln in lines if ln.ink > 0]
-    body_ink = statistics.median(inks) if inks else 0.0
+    return PageMetrics(left, right, body_height, usual_gap, statistics.median(inks) if inks else 0.0)
+
+
+def build_paragraphs(
+    rows: list[list[OcrLine]],
+    barriers: list[tuple[float, float]] | None = None,
+    page_height: float | None = None,
+    metrics: PageMetrics | None = None,
+) -> list[Paragraph]:
+    """barriers — вертикальные интервалы (таблицы, рисунки): абзац через них не продолжается.
+    metrics — метрики всей страницы, если строки — часть страницы (блок или колонка)."""
+    lines = [line for line in (_to_line(row) for row in rows) if line is not None]
+    lines.sort(key=lambda ln: (ln.y0, ln.x0))
+    lines = _drop_page_numbers(lines, page_height)
+    if not lines:
+        return []
+    metrics = metrics or page_metrics([rows])
+    left, right = metrics.left, metrics.right
+    body_height, usual_gap, body_ink = metrics.body_height, metrics.usual_gap, metrics.body_ink
 
     groups: list[list[_Line]] = []
     for line in lines:
@@ -191,6 +215,7 @@ def _make_paragraph(group: list[_Line], left: float, right: float, body_height: 
     indent = align in ("left", "justify") and group[0].x0 - left > 1.2 * body_height
     paragraph = Paragraph(
         text=text.strip(), align=align, bold=bold, indent=indent, top=group[0].y0, lines=len(group),
+        left=min(ln.x0 for ln in group), right=max(ln.x1 for ln in group), bottom=group[-1].y1,
         size_pt=min(28.0, max(7.0, size)) if measurable and _size_class(ratio) else None,
     )
     paragraph.style = _heading_style(paragraph, ratio if measurable else 1.0)

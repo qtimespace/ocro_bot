@@ -14,7 +14,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Emu, Inches, Pt, RGBColor
 from PIL import Image
 
-from app.models import DocxMode, PageResult, Paragraph, Table
+from app.models import DocxMode, Figure, PageResult, Paragraph, Table
 
 # Символы, недопустимые в XML 1.0 (python-docx на них падает).
 _INVALID_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
@@ -107,6 +107,16 @@ def _add_paragraph(doc, block: Paragraph) -> None:
             run.font.color.rgb = RGBColor(0, 0, 0)  # стиль заголовка Word, но без синего цвета
 
 
+def _add_figure(doc, figure: Figure) -> None:
+    section = doc.sections[-1]
+    available = section.page_width - section.left_margin - section.right_margin
+    share = figure.width / figure.page_width if figure.page_width else 0.5
+    width = int(available * min(1.0, max(0.15, share)))
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.add_run().add_picture(str(figure.path), width=width)
+
+
 def _add_page_content(doc, page: PageResult) -> None:
     if not page.blocks:
         _add_lines(doc, page.text)
@@ -116,6 +126,8 @@ def _add_page_content(doc, page: PageResult) -> None:
             _add_table(doc, block)
         elif isinstance(block, Paragraph):
             _add_paragraph(doc, block)
+        elif isinstance(block, Figure):
+            _add_figure(doc, block)
         else:
             p = doc.add_paragraph(clean_text(block))
             p.paragraph_format.space_after = Pt(0)
