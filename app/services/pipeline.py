@@ -46,6 +46,10 @@ MAX_AI_HINTS = 60
 # Автоповорот: уверенно распознанный фрагмент и порог «вертикальная строка».
 CONFIDENT = 0.8
 TALL_RATIO = 1.5
+# Доля тёмных пикселей, начиная с которой «пустая» по OCR страница проверяется на переворот,
+# и сколько уверенных символов должно найтись в перевёрнутой странице.
+MIN_INK_SHARE = 0.01
+MIN_TURNED_CHARS = 20
 ProgressCallback = Callable[[str], Awaitable[None]]
 
 
@@ -108,6 +112,13 @@ def _turn_page_file(page: PageImage, k: int) -> None:
         turned = np.ascontiguousarray(np.rot90(np.asarray(im), k))
     Image.fromarray(turned).save(page.path, format="PNG")
     page.height, page.width = turned.shape[:2]
+
+
+def _ink_share(image) -> float:
+    """Доля тёмных пикселей (порог фиксированный: на чистом листе Оцу находит «краску» в шуме)."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    step = max(1, gray.shape[1] // 600)  # прореживание, а не усреднение: тонкий текст не светлеет
+    return float((gray[::step, ::step] < 128).mean())
 
 
 def _confident_chars(ocr: OcrResult) -> int:
@@ -220,13 +231,17 @@ class Pipeline:
     def _find_rotation(self, image, ocr: OcrResult) -> tuple[int, OcrResult | None]:
         """Поворот страницы (k×90° против часовой) по образцу docling: перепроверяются только подозрительные
         страницы. Больше половины строк вертикальные — пробуем 90° и 270°; больше половины распознано
-        неуверенно — пробуем 180° и берём, если уверенного текста хотя бы вдвое больше."""
+        неуверенно — пробуем 180° и берём, если уверенного текста хотя бы вдвое больше.
+        Перевёрнутый текст OCR часто отбрасывает целиком (0 строк), поэтому страница с заметной
+        «краской», но почти без текста тоже проверяется на 180°; пустая страница — нет."""
         fragments = [f for f in ocr.fragments if f.text.strip()]
-        if len(fragments) < 3:
-            return 0, None
         tall = sum((f.box[3] - f.box[1]) > TALL_RATIO * (f.box[2] - f.box[0]) for f in fragments)
         confident = sum(f.confidence >= CONFIDENT for f in fragments)
-        if tall * 2 > len(fragments):
+        if len(fragments) < 3:
+            if _ink_share(image) < MIN_INK_SHARE:
+                return 0, None
+            candidates, need = (2,), max(MIN_TURNED_CHARS, 2 * _confident_chars(ocr))
+        elif tall * 2 > len(fragments):
             candidates, need = (1, 3), 1
         elif confident * 2 < len(fragments):
             candidates, need = (2,), 2 * max(1, _confident_chars(ocr))

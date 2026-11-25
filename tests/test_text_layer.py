@@ -186,6 +186,41 @@ async def test_rotated_page_is_turned_upright(tmp_path, k):
     assert (page.page.width, page.page.height) == (600, 800)
 
 
+class SilentWhenUpsideDownOcr(OrientationOcr):
+    """Как настоящий RapidOCR: перевёрнутый текст отбрасывается целиком (0 строк)."""
+
+    def recognize(self, image):
+        result = super().recognize(image)
+        h, w = image.shape[:2]
+        return result if image[10:40, 10:40].mean() < 128 or w > h else OcrResult()
+
+
+def text_page() -> np.ndarray:
+    page = upright_page()
+    page[100:400:20, 60:500] = 0  # «строки текста» — краска на странице
+    return page
+
+
+async def test_upside_down_page_without_any_ocr_text_is_turned(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    Image.fromarray(np.ascontiguousarray(np.rot90(text_page(), 2))).save(work / "in", format="PNG")
+    ocr = SilentWhenUpsideDownOcr()
+    settings = make_settings(tmp_path, OCR_DESKEW="false", DETECT_TABLES="false")
+    result = await Pipeline(settings, ocr).run(work / "in", work, "off")
+    assert "Первая строка документа" in result.pages[0].text
+
+
+async def test_blank_page_not_retried(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    Image.new("RGB", (600, 800), "white").save(work / "in", format="PNG")
+    ocr = SilentWhenUpsideDownOcr()
+    settings = make_settings(tmp_path, OCR_DESKEW="false", DETECT_TABLES="false")
+    await Pipeline(settings, ocr).run(work / "in", work, "off")
+    assert ocr.calls == 1
+
+
 async def test_upright_page_recognized_once(tmp_path):
     result, ocr = await run_image(tmp_path, upright_page())
     assert ocr.calls == 1 and "Первая строка" in result.pages[0].text
