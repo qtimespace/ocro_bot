@@ -218,6 +218,11 @@ def warning_messages(result: JobResult) -> list[str]:
 
 def result_caption(result: JobResult) -> str:
     caption = f"Готово: {len(result.pages)} стр., режим проверки: {MODE_TITLES[result.mode]}."
+    digital = sum(p.page.digital for p in result.pages)
+    if digital == len(result.pages):
+        caption += "\nТекст взят из PDF как есть, без распознавания."
+    elif digital:
+        caption += f"\nСтраниц с текстом из PDF (без распознавания): {digital} из {len(result.pages)}."
     if result.ai_failed:
         caption += "\n⚠️ ИИ-проверка не выполнена — текст НЕ проверен."
     return caption

@@ -13,6 +13,7 @@ import pymupdf as fitz
 from PIL import Image, ImageOps
 
 from app.models import PageImage
+from app.services.text_layer import extract_text_layer
 
 log = logging.getLogger(__name__)
 
@@ -58,10 +59,12 @@ def parse_file(
     max_pixels: int,
     pdf_dpi: int = 200,
     max_side: int = 0,
+    text_layer: bool = False,
 ) -> list[PageImage]:
     """Проверяет файл и сохраняет страницы как PNG в out_dir.
 
     max_side > 0 ограничивает длинную сторону страницы (экономия памяти на слабых серверах).
+    text_layer — брать текст цифровых PDF из файла (страница получает text_lines).
     """
     check_size(path.stat().st_size, max_bytes)
     with path.open("rb") as fh:
@@ -71,7 +74,8 @@ def parse_file(
         raise InputFileError(f"Неподдерживаемый формат файла. Поддерживаются: {SUPPORTED_FORMATS_TEXT}.")
     out_dir.mkdir(parents=True, exist_ok=True)
     if kind == "pdf":
-        return _parse_pdf(path, out_dir, max_pages=max_pages, max_pixels=max_pixels, dpi=pdf_dpi, max_side=max_side)
+        return _parse_pdf(path, out_dir, max_pages=max_pages, max_pixels=max_pixels, dpi=pdf_dpi, max_side=max_side,
+                          text_layer=text_layer)
     return _parse_image(path, out_dir, kind, max_pages=max_pages, max_pixels=max_pixels, max_side=max_side)
 
 
@@ -150,7 +154,8 @@ def _parse_image(
 
 
 def _parse_pdf(
-    path: Path, out_dir: Path, *, max_pages: int, max_pixels: int, dpi: int, max_side: int = 0
+    path: Path, out_dir: Path, *, max_pages: int, max_pixels: int, dpi: int, max_side: int = 0,
+    text_layer: bool = False,
 ) -> list[PageImage]:
     try:
         doc = fitz.open(path, filetype="pdf")
@@ -186,8 +191,17 @@ def _parse_pdf(
                 _check_pixels(pix.width, pix.height, max_pixels)
                 target = _page_path(out_dir, page_no + 1)
                 pix.save(target)
-                pages.append(PageImage(index=page_no + 1, path=target, width=pix.width, height=pix.height))
+                image = PageImage(index=page_no + 1, path=target, width=pix.width, height=pix.height)
                 del pix
+                if text_layer:
+                    try:
+                        layer = extract_text_layer(page, scale)
+                    except Exception:
+                        log.warning("Text layer of PDF page %s unreadable, using OCR", page_no + 1)
+                        layer = None
+                    if layer is not None:
+                        image.text_lines, image.bitmaps = layer.lines, layer.bitmaps
+                pages.append(image)
             except InputFileError:
                 raise
             except Exception as exc:

@@ -92,6 +92,14 @@ class PageImage:
     width: int
     height: int
     source: int = 1  # номер входного файла в пачке (с 1)
+    # Текст страницы цифрового PDF (из файла, без OCR), в пикселях изображения. None — распознавать OCR.
+    text_lines: list["OcrLine"] | None = None
+    # Крупные картинки цифровой страницы (пиксели): их содержимое распознаётся OCR.
+    bitmaps: list[tuple[float, float, float, float]] = field(default_factory=list)
+
+    @property
+    def digital(self) -> bool:
+        return self.text_lines is not None
 
 
 @dataclass

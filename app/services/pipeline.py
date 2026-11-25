@@ -27,7 +27,7 @@ from app.services.document_builder import build_docx
 from app.services.layout import LayoutDetector, contains, overlap_ratio
 from app.services.pdf_builder import PdfBuildError, build_searchable_pdf
 from app.services.file_parser import InputFileError, parse_file
-from app.services.ocr_engine import OcrEngine
+from app.services.ocr_engine import OcrEngine, order_fragments
 from app.services.page_order import detect_page_number, has_conflicting_numbers, order_by_page_numbers
 from app.services.preprocessing import load_for_ocr
 from app.services.spelling import SpellChecker, document_vocabulary
@@ -43,6 +43,9 @@ JOB_PREFIX = "job_"
 FIGURE_MAX_TEXT_SHARE = 0.5
 MAX_SUSPICIOUS_SHOWN = 15
 MAX_AI_HINTS = 60
+# Автоповорот: уверенно распознанный фрагмент и порог «вертикальная строка».
+CONFIDENT = 0.8
+TALL_RATIO = 1.5
 ProgressCallback = Callable[[str], Awaitable[None]]
 
 
@@ -99,6 +102,18 @@ def _rotate_page_file(path: Path, degrees: float) -> None:
     Image.fromarray(rotated).save(path, format="PNG")
 
 
+def _turn_page_file(page: PageImage, k: int) -> None:
+    """Поворот файла страницы на k×90° против часовой стрелки (как np.rot90)."""
+    with Image.open(page.path) as im:
+        turned = np.ascontiguousarray(np.rot90(np.asarray(im), k))
+    Image.fromarray(turned).save(page.path, format="PNG")
+    page.height, page.width = turned.shape[:2]
+
+
+def _confident_chars(ocr: OcrResult) -> int:
+    return sum(len(f.text.strip()) for f in ocr.fragments if f.confidence >= CONFIDENT)
+
+
 def measure_ink(ocr: OcrResult, gray) -> None:
     """Доля тёмных пикселей в рамке каждого фрагмента (признак жирного шрифта); интегральное изображение — O(1) на рамку."""
     if gray is None or gray.size == 0:
@@ -139,12 +154,14 @@ class Pipeline:
             speller = SpellChecker.create(settings.languages, settings.spell_dict_dir)
         self.speller = speller
 
-    def _ocr_page(self, page: PageImage) -> PageScan:
+    def _ocr_page(self, page: PageImage, check_rotation: bool = True, rotated_ocr: OcrResult | None = None
+                  ) -> PageScan:
         """Выравнивание наклона, OCR, удаление примечаний Word и поиск таблиц для одной страницы."""
         s = self.settings
         image = load_for_ocr(page.path, s.preprocess_steps)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        skew = estimate_skew(gray) if s.ocr_deskew else 0.0
+        # Цифровая страница отрендерена из PDF ровно — наклон не ищем.
+        skew = estimate_skew(gray) if s.ocr_deskew and not page.digital else 0.0
         if skew:
             # Копия для OCR и сам оригинал страницы выравниваются одинаково: координаты OCR совпадают
             # с изображением (текстовый слой PDF, обрезка примечаний), а в документе страница ровная.
@@ -152,7 +169,19 @@ class Pipeline:
             _rotate_page_file(page.path, skew)
         tables = detect_tables(gray, image) if s.detect_tables else []
         regions = self._detect_layout(image)
-        scan = PageScan(ocr=self.ocr_engine.recognize(erase_table_lines(image, tables)), skew=skew, regions=regions)
+        if page.digital:
+            ocr = self._digital_text(page, image)
+        elif rotated_ocr is not None and not tables and not skew:
+            ocr = rotated_ocr  # уже распознано при выборе поворота — повторный OCR не нужен
+        else:
+            ocr = self.ocr_engine.recognize(erase_table_lines(image, tables))
+            if check_rotation and s.ocr_auto_rotate:
+                turn, turned_ocr = self._find_rotation(image, ocr)
+                if turn:
+                    log.info("Page %s rotated by %d degrees", page.index, turn * 90)
+                    _turn_page_file(page, turn)
+                    return self._ocr_page(page, check_rotation=False, rotated_ocr=turned_ocr)
+        scan = PageScan(ocr=ocr, skew=skew, regions=regions)
         measure_ink(scan.ocr, gray)
 
         cut = None
@@ -169,6 +198,50 @@ class Pipeline:
         if cut is not None:
             scan.regions = [r for r in scan.regions if r.box[0] < cut]
         return scan
+
+    def _digital_text(self, page: PageImage, image) -> OcrResult:
+        """Текст из PDF; крупные картинки страницы (вставленный скан, скриншот) распознаются OCR,
+        найденный в них текст добавляется, если не дублирует текст PDF."""
+        source = page.text_lines or []
+        lines = [replace(line) for line in source]
+        h, w = image.shape[:2]
+        for box in page.bitmaps:
+            x0, y0 = max(0, int(box[0])), max(0, int(box[1]))
+            x1, y1 = min(w, int(box[2])), min(h, int(box[3]))
+            if x1 - x0 < 32 or y1 - y0 < 32:
+                continue
+            for fragment in self.ocr_engine.recognize(np.ascontiguousarray(image[y0:y1, x0:x1])).fragments:
+                fb = (fragment.box[0] + x0, fragment.box[1] + y0, fragment.box[2] + x0, fragment.box[3] + y0)
+                cx, cy = (fb[0] + fb[2]) / 2, (fb[1] + fb[3]) / 2
+                if not any(contains(line.box, cx, cy, 0) for line in source):
+                    lines.append(replace(fragment, box=fb))
+        return OcrResult(rows=order_fragments(lines))
+
+    def _find_rotation(self, image, ocr: OcrResult) -> tuple[int, OcrResult | None]:
+        """Поворот страницы (k×90° против часовой) по образцу docling: перепроверяются только подозрительные
+        страницы. Больше половины строк вертикальные — пробуем 90° и 270°; больше половины распознано
+        неуверенно — пробуем 180° и берём, если уверенного текста хотя бы вдвое больше."""
+        fragments = [f for f in ocr.fragments if f.text.strip()]
+        if len(fragments) < 3:
+            return 0, None
+        tall = sum((f.box[3] - f.box[1]) > TALL_RATIO * (f.box[2] - f.box[0]) for f in fragments)
+        confident = sum(f.confidence >= CONFIDENT for f in fragments)
+        if tall * 2 > len(fragments):
+            candidates, need = (1, 3), 1
+        elif confident * 2 < len(fragments):
+            candidates, need = (2,), 2 * max(1, _confident_chars(ocr))
+        else:
+            return 0, None
+        best, best_ocr, best_score = 0, None, 0
+        for k in candidates:
+            turned = self.ocr_engine.recognize(np.ascontiguousarray(np.rot90(image, k)))
+            score = _confident_chars(turned)
+            if score > best_score:
+                best, best_ocr, best_score = k, turned, score
+            good = [f for f in turned.fragments if f.text.strip()]
+            if score >= need and sum(f.confidence >= CONFIDENT for f in good) * 2 > len(good):
+                break  # поворот уверенно найден — остальные варианты не пробуем (экономия OCR)
+        return (best, best_ocr) if best and best_score >= need else (0, None)
 
     def _detect_layout(self, image) -> list[Region]:
         if self.layout is None:
@@ -210,6 +283,7 @@ class Pipeline:
                     max_pixels=s.max_image_pixels,
                     pdf_dpi=s.pdf_dpi,
                     max_side=s.page_max_side,
+                    text_layer=s.pdf_text_layer,
                 )
             except InputFileError as exc:
                 if len(inputs) > 1:
@@ -228,13 +302,13 @@ class Pipeline:
         recognized: list[tuple[PageImage, OcrResult]] = []
         scans: dict[int, PageScan] = {}
         for page in pages:
-            await report(f"Распознаю страницу {page.index} из {total}…")
+            await report(f"{'Читаю' if page.digital else 'Распознаю'} страницу {page.index} из {total}…")
             started = time.monotonic()
             scan = await asyncio.to_thread(self._ocr_page, page)
             scans[id(page)] = scan
-            log.info("OCR page %s/%s: %d fragments in %.1fs, skew=%.2f, tables=%d, comment fragments removed: %d",
-                     page.index, total, len(scan.ocr.fragments), time.monotonic() - started, scan.skew,
-                     len(scan.tables), scan.removed_comments)
+            log.info("%s page %s/%s: %d fragments in %.1fs, skew=%.2f, tables=%d, comment fragments removed: %d",
+                     "PDF text" if page.digital else "OCR", page.index, total, len(scan.ocr.fragments),
+                     time.monotonic() - started, scan.skew, len(scan.tables), scan.removed_comments)
             recognized.append((page, scan.ocr))
 
         job_warnings: list[str] = []
@@ -252,7 +326,8 @@ class Pipeline:
             result = PageResult(page=page, text=blocks_to_text(blocks), blocks=blocks, fragments=ocr.fragments)
             if scan.removed_comments:
                 result.warnings.append(f"Страница {page.index}: примечания Word на полях исключены из текста.")
-            self._spellcheck(result, vocab)
+            if not page.digital:  # текст PDF точный — орфографию не правим
+                self._spellcheck(result, vocab)
 
             # Со словарём предупреждения — по словам не из словаря; без него — по низкой уверенности OCR.
             low = [] if self.speller else [f for f in ocr.fragments if f.confidence < s.ocr_min_confidence]
@@ -264,7 +339,15 @@ class Pipeline:
             results.append(result)
 
         if mode != "off":
-            await self._validate_all(results, mode, report, job_warnings)
+            digital = [r.page.index for r in results if r.page.digital]
+            if digital:
+                job_warnings.append(
+                    ("Текст всех страниц" if len(digital) == len(results) else
+                     "Текст страниц " + ", ".join(map(str, digital)))
+                    + " взят из PDF без распознавания — ИИ-проверка для них не нужна."
+                )
+            if any(r.text and not r.page.digital for r in results):
+                await self._validate_all(results, mode, report, job_warnings)
         for result in results:
             if mode != "off" and result.validation in ("text_checked", "image_checked"):
                 self._spellcheck(result, vocab)  # после правок ИИ — что осталось не из словаря
@@ -279,7 +362,8 @@ class Pipeline:
         await report("Формирую DOCX…")
         docx_path = await asyncio.to_thread(build_docx, results, work_dir / "result.docx", s.docx_mode)
         pdf_path = None
-        if s.searchable_pdf:
+        # У цифрового PDF текст уже есть — копия с текстовым слоем нужна, только если есть сканы.
+        if s.searchable_pdf and not all(r.page.digital for r in results):
             if self.speller is not None:
                 for result in results:  # те же безопасные исправления, что и в DOCX
                     result.fragments = [
@@ -360,7 +444,7 @@ class Pipeline:
 
     async def _validate_all(self, results: list[PageResult], mode: ValidationMode, report, notes: list[str]) -> None:
         """AI-проверка страниц параллельно (до AI_CONCURRENCY запросов). После сбоя новые запросы не отправляются."""
-        pending = [r for r in results if r.text]
+        pending = [r for r in results if r.text and not r.page.digital]
         semaphore = asyncio.Semaphore(self.settings.ai_concurrency)
         state = {"failed": False, "done": 0}
 

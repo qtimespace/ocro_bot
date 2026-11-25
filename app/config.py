@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # Модель распознавания для onnx: eslav (по умолчанию для ru), cyrillic, en, latin.
     ocr_rec_lang: str = Field(default="", alias="OCR_REC_LANG")
     ocr_orientation: bool = Field(default=False, alias="OCR_ORIENTATION")
+    # Повёрнутые на 90°/180° страницы: при вертикальных строках или плохом распознавании страница
+    # распознаётся повторно в других поворотах. Ровные страницы ничего не теряют.
+    ocr_auto_rotate: bool = Field(default=True, alias="OCR_AUTO_ROTATE")
+    # Текст цифровых PDF (из Word, 1С, браузера) берётся из файла без OCR: быстрее и без ошибок.
+    pdf_text_layer: bool = Field(default=True, alias="PDF_TEXT_LAYER")
     ocr_det_limit_side: int = Field(default=1280, ge=0, alias="OCR_DET_LIMIT_SIDE")
     strip_word_comments: bool = Field(default=True, alias="STRIP_WORD_COMMENTS")
     # Проверка орфографии словарями Hunspell (Enchant): автоисправление смешения алфавитов и регистра,
