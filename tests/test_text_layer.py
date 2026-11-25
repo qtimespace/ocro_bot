@@ -60,7 +60,8 @@ def test_text_and_pixel_coordinates(tmp_path):
     layer, (w, h) = layer_of(make_pdf(tmp_path / "a.pdf"))
     assert [line.text for line in layer.lines] == [RU, EN]
     x0, y0, x1, y1 = layer.lines[0].box
-    assert 140 <= x0 <= 150 and 180 <= y0 <= 200 and x1 < w  # 72 pt × 2 = 144 px
+    # 72 pt × 2 = 144 px; верх строки зависит от высоты букв шрифта (Arial/DejaVu).
+    assert 140 <= x0 <= 150 and 165 <= y0 <= 200 and x1 < w
     assert layer.bitmaps == []
 
 
